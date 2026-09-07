@@ -18,7 +18,7 @@ use rayon::prelude::*;
 use crate::util::cpu_count;
 
 use super::{
-    TargetEntry,
+    ScanRoot, TargetEntry,
     cargo_config::{DiscoveredEntry, Resolver},
     measure::{Measurement, measure_target},
 };
@@ -46,12 +46,6 @@ struct Ctx {
     /// entirely while no customs exist.
     has_customs: AtomicBool,
     manifests: Mutex<Vec<PathBuf>>,
-}
-
-/// Find project/output pairs without measuring them.
-#[tracing::instrument(skip_all, fields(root = %root.display()))]
-pub fn discover(root: &Path) -> Vec<DiscoveredEntry> {
-    discover_with(root, Resolver::new())
 }
 
 /// Test seam: disk fixtures fully determine the result.
@@ -98,6 +92,36 @@ pub(crate) fn discover_with(root: &Path, mut resolver: Resolver) -> Vec<Discover
             }
         }
     }
+    sort_and_dedup(entries)
+}
+
+/// Find project/output pairs across the host root plus volume roots.
+/// Roots missing from disk are skipped. One row per output dir survives,
+/// host roots first so a volume overlapping the host keeps the host label.
+pub fn discover_roots(roots: &[ScanRoot]) -> Vec<DiscoveredEntry> {
+    discover_roots_with(roots, Resolver::new)
+}
+
+/// Test seam: disk fixtures fully determine the result.
+pub(crate) fn discover_roots_with(
+    roots: &[ScanRoot],
+    make_resolver: impl Fn() -> Resolver,
+) -> Vec<DiscoveredEntry> {
+    let mut entries = Vec::new();
+    for root in roots {
+        if !root.path.is_dir() {
+            continue;
+        }
+        let mut found = discover_with(&root.path, make_resolver());
+        for entry in &mut found {
+            entry.volume = root.volume.clone();
+        }
+        entries.extend(found);
+    }
+    sort_and_dedup(entries)
+}
+
+fn sort_and_dedup(mut entries: Vec<DiscoveredEntry>) -> Vec<DiscoveredEntry> {
     entries.sort_by(|a, b| {
         a.project_path
             .cmp(&b.project_path)
@@ -114,14 +138,33 @@ pub(crate) fn discover_with(root: &Path, mut resolver: Resolver) -> Vec<Discover
     entries
 }
 
-/// Discover then measure, streaming progress over `tx`.
-pub fn scan_stream(root: &Path, tx: mpsc::Sender<ScanEvent>) {
-    scan_stream_with(root, tx, Resolver::new());
+/// Test seam: disk fixtures fully determine the result.
+#[cfg(test)]
+pub(crate) fn scan_stream_with(root: &Path, tx: mpsc::Sender<ScanEvent>, resolver: Resolver) {
+    let projects = discover_with(root, resolver);
+    if tx.send(ScanEvent::Discovered(projects.clone())).is_err() {
+        return;
+    }
+    projects.par_iter().for_each_with(tx.clone(), |tx, entry| {
+        let m = measure_target(&entry.target_dir);
+        let _ = tx.send(ScanEvent::Measured(m));
+    });
+    let build_cache = super::cache::build_cache_entry();
+    let _ = tx.send(ScanEvent::Done { build_cache });
+}
+
+/// Discover across roots then measure, streaming progress over `tx`.
+pub fn scan_stream_roots(roots: &[ScanRoot], tx: mpsc::Sender<ScanEvent>) {
+    scan_stream_roots_with(roots, tx, Resolver::new);
 }
 
 /// Test seam: disk fixtures fully determine the result.
-pub(crate) fn scan_stream_with(root: &Path, tx: mpsc::Sender<ScanEvent>, resolver: Resolver) {
-    let projects = discover_with(root, resolver);
+pub(crate) fn scan_stream_roots_with(
+    roots: &[ScanRoot],
+    tx: mpsc::Sender<ScanEvent>,
+    make_resolver: impl Fn() -> Resolver + Sync,
+) {
+    let projects = discover_roots_with(roots, make_resolver);
     if tx.send(ScanEvent::Discovered(projects.clone())).is_err() {
         return;
     }
@@ -460,5 +503,42 @@ mod tests {
         )));
         assert!(matches!(events.last(), Some(ScanEvent::Done { .. })));
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn roots_merge_with_volume_tags_and_skip_missing() {
+        let base = std::env::temp_dir().join("cargo-shepherd-test-multi-root");
+        let _ = fs::remove_dir_all(&base);
+        for proj in ["host-proj", "vol-proj"] {
+            fs::create_dir_all(base.join(proj).join("target")).unwrap();
+            fs::write(base.join(proj).join("Cargo.toml"), "[package]\n").unwrap();
+        }
+        let roots = vec![
+            ScanRoot::host(base.clone()),
+            ScanRoot {
+                path: base.clone(),
+                volume: Some("vol-a".to_string()),
+            },
+            ScanRoot::host(base.join("gone")),
+        ];
+        let found = discover_roots_with(&roots, Resolver::hermetic);
+        // Same `target/` dirs collapse to one row; the host root sorts first
+        // so overlapping hits keep the host label.
+        assert_eq!(found.len(), 2);
+        assert!(found.iter().all(|e| e.volume.is_none()));
+        let vol_only = discover_roots_with(
+            &[ScanRoot {
+                path: base.clone(),
+                volume: Some("vol-a".to_string()),
+            }],
+            Resolver::hermetic,
+        );
+        assert_eq!(vol_only.len(), 2);
+        assert!(
+            vol_only
+                .iter()
+                .all(|e| e.volume.as_deref() == Some("vol-a"))
+        );
+        let _ = fs::remove_dir_all(&base);
     }
 }

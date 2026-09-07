@@ -64,6 +64,7 @@ impl App {
                     target_dir: found.target_dir,
                     kind: found.kind,
                     shared: found.shared,
+                    volume: found.volume,
                     size: None,
                     last_modified: None,
                 }
@@ -145,6 +146,7 @@ impl App {
                     re.is_match(&e.project_name())
                         || re.is_match(&e.project_path.to_string_lossy())
                         || re.is_match(&e.target_dir.to_string_lossy())
+                        || e.volume.as_deref().is_some_and(|v| re.is_match(v))
                 })
                 .map(|(i, _)| i)
                 .collect(),
@@ -179,12 +181,12 @@ impl App {
                 && m.last_modified.is_some()
             {
                 // The build cache arrived after startup, so give it a row now.
-                // The poller tracks it from the next reset.
                 self.build_cache = Some(TargetEntry {
                     project_path: m.target_dir.clone(),
                     target_dir: m.target_dir.clone(),
                     kind: crate::scan::OutputKind::Target,
                     shared: false,
+                    volume: None,
                     size: Some(m.size),
                     last_modified: m.last_modified,
                 });

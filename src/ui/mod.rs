@@ -311,11 +311,24 @@ pub(crate) fn project_spans(
             crate::scan::OutputKind::Target => Color::Green,
             crate::scan::OutputKind::Build => Color::Blue,
         };
-        return vec![Span::styled(shared, base.fg(color))];
+        let mut spans = vec![Span::styled(shared, base.fg(color))];
+        if let Some(volume) = &entry.volume {
+            spans.push(Span::styled(
+                format!(" [docker:{volume}]"),
+                Style::default().fg(Color::Cyan),
+            ));
+        }
+        return spans;
     }
     let mut spans = vec![Span::styled(entry.project_name(), base)];
     if let Some((label, color)) = output_suffix(entry, entries) {
         spans.push(Span::styled(label, Style::default().fg(color)));
+    }
+    if let Some(volume) = &entry.volume {
+        spans.push(Span::styled(
+            format!(" [docker:{volume}]"),
+            Style::default().fg(Color::Cyan),
+        ));
     }
     spans
 }
@@ -509,6 +522,7 @@ mod tests {
             target_dir: std::path::PathBuf::from("proj-a/target"),
             kind: crate::scan::OutputKind::Target,
             shared: false,
+            volume: None,
             size: None,
             last_modified: None,
         };
@@ -522,6 +536,7 @@ mod tests {
             target_dir: std::path::PathBuf::from(dir),
             kind,
             shared: false,
+            volume: None,
             size: None,
             last_modified: None,
         };
@@ -547,6 +562,7 @@ mod tests {
             target_dir: std::path::PathBuf::from("proj/target"),
             kind: OutputKind::Target,
             shared: false,
+            volume: None,
             size: None,
             last_modified: None,
         };
@@ -566,6 +582,7 @@ mod tests {
             target_dir: std::path::PathBuf::from("/shared"),
             kind,
             shared: true,
+            volume: None,
             size: None,
             last_modified: None,
         };
@@ -587,12 +604,12 @@ mod tests {
     #[test]
     fn shared_cells_render_name_in_per_kind_color() {
         use crate::scan::{OutputKind, TargetEntry};
-        use ratatui::style::Style;
         let entry = |kind: OutputKind| TargetEntry {
             project_path: std::path::PathBuf::from("proj"),
             target_dir: std::path::PathBuf::from("/shared"),
             kind,
             shared: true,
+            volume: None,
             size: None,
             last_modified: None,
         };
@@ -606,6 +623,25 @@ mod tests {
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].content.as_ref(), "Shared Build Dir");
         assert_eq!(spans[0].style.fg, Some(Color::Blue));
+    }
+
+    #[test]
+    fn volume_entries_append_docker_tag() {
+        use crate::scan::{OutputKind, TargetEntry};
+        use ratatui::style::Style;
+        let vol = TargetEntry {
+            project_path: std::path::PathBuf::from("proj"),
+            target_dir: std::path::PathBuf::from("proj/target"),
+            kind: OutputKind::Target,
+            shared: false,
+            volume: Some("v".to_string()),
+            size: None,
+            last_modified: None,
+        };
+        let spans = project_spans(&vol, std::slice::from_ref(&vol), Style::default());
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[1].content.as_ref(), " [docker:v]");
+        assert_eq!(spans[1].style.fg, Some(Color::Cyan));
     }
 
     #[test]

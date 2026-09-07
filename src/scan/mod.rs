@@ -5,11 +5,13 @@
 mod cache;
 mod cargo_config;
 mod discover;
+mod docker;
 mod measure;
 
 pub use cache::{build_cache_entry, build_cache_path};
 pub use cargo_config::{DiscoveredEntry, OutputKind};
-pub use discover::{ScanEvent, discover, scan_stream};
+pub use discover::{ScanEvent, discover_roots, scan_stream_roots};
+pub use docker::{ScanRoot, list_volumes, usable_roots};
 pub use measure::{Measurement, measure_target};
 
 use std::{
@@ -28,6 +30,8 @@ pub struct TargetEntry {
     pub kind: OutputKind,
     /// True when the dir came from `$CARGO_HOME/config.toml`.
     pub shared: bool,
+    /// Containing volume name for `--docker` hits, else `None`.
+    pub volume: Option<String>,
     /// Disk usage of `target_dir` in bytes, `du` semantics. `None` while
     /// the size walk has not measured this entry yet.
     pub size: Option<u64>,
@@ -58,4 +62,28 @@ impl TargetEntry {
 
 pub fn resolve_root(raw: &Path) -> PathBuf {
     std::fs::canonicalize(raw).unwrap_or_else(|_| raw.to_path_buf())
+}
+
+/// Walk roots for a scan: the host root plus locally accessible volume
+/// mountpoints when `include_docker` is set. Skipped volumes warn on
+/// stderr. Daemon failures bail so `--docker` never silently scans host only.
+pub fn resolve_scan_roots(host: &Path, include_docker: bool) -> eyre::Result<Vec<ScanRoot>> {
+    let mut roots = vec![ScanRoot::host(resolve_root(host))];
+    if !include_docker {
+        return Ok(roots);
+    }
+    let volumes = list_volumes()?;
+    if volumes.is_empty() {
+        eprintln!("--docker: no container volumes found");
+        return Ok(roots);
+    }
+    let (mut usable, skipped) = usable_roots(&volumes);
+    for line in &skipped {
+        eprintln!("{line}");
+    }
+    for root in &mut usable {
+        root.path = resolve_root(&root.path);
+    }
+    roots.append(&mut usable);
+    Ok(roots)
 }

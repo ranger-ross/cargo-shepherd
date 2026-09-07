@@ -1,6 +1,6 @@
 use std::{
     io::{self, Write},
-    path::Path,
+    path::PathBuf,
     time::{Duration, SystemTime},
 };
 
@@ -14,9 +14,13 @@ use crate::{
 };
 
 /// Blocking scan that reuses the TUI state for sorting and totals.
-fn collect(root: &Path) -> App {
-    let mut app = App::new(root.to_path_buf());
-    app.set_discovered(scan::discover(root));
+fn collect(roots: &[crate::scan::ScanRoot]) -> App {
+    let host = roots
+        .first()
+        .map(|r| r.path.clone())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let mut app = App::new(host);
+    app.set_discovered(scan::discover_roots(roots));
     let measurements: Vec<_> = app
         .entries
         .par_iter()
@@ -29,17 +33,24 @@ fn collect(root: &Path) -> App {
 
 fn project_label(entry: &TargetEntry, entries: &[TargetEntry]) -> String {
     if let Some(shared) = entry.shared_label() {
-        return shared.to_string();
+        return match &entry.volume {
+            Some(volume) => format!("{shared} [docker:{volume}]"),
+            None => shared.to_string(),
+        };
     }
     let suffix = output_suffix(entry, entries)
         .map(|(label, _)| label)
         .unwrap_or("");
-    format!("{}{}", entry.project_name(), suffix)
+    let base = format!("{}{}", entry.project_name(), suffix);
+    match &entry.volume {
+        Some(volume) => format!("{base} [docker:{volume}]"),
+        None => base,
+    }
 }
 
 /// Print the TUI table rows as aligned text.
-pub fn run_list(root: &Path) -> Result<()> {
-    let app = collect(root);
+pub fn run_list(roots: &[crate::scan::ScanRoot]) -> Result<()> {
+    let app = collect(roots);
     let mut out = io::stdout().lock();
     if app.entries.is_empty() {
         writeln!(out, "No target/ directories found.")?;
@@ -109,7 +120,7 @@ fn render_table(out: &mut impl Write, shown: &[&TargetEntry], all: &[TargetEntry
 /// only passed filters constrain. With neither passed, fall back to older
 /// than 30d and larger than 100MB.
 pub fn run_clean(
-    root: &Path,
+    roots: &[crate::scan::ScanRoot],
     older_than: Option<&str>,
     larger_than: Option<&str>,
     yes: bool,
@@ -132,7 +143,7 @@ pub fn run_clean(
         .collect::<Vec<_>>()
         .join(" and ");
     let now = SystemTime::now();
-    let app = collect(root);
+    let app = collect(roots);
     let candidates: Vec<&TargetEntry> = app
         .entries
         .iter()
@@ -328,6 +339,7 @@ mod tests {
             target_dir: "proj/target".into(),
             kind: crate::scan::OutputKind::Target,
             shared: false,
+            volume: None,
             size,
             last_modified: age.map(|a| SystemTime::now() - a),
         }
@@ -376,7 +388,6 @@ mod tests {
             None
         ));
     }
-
     #[test]
     fn shared_entries_list_under_special_name() {
         let shared = TargetEntry {
@@ -384,10 +395,26 @@ mod tests {
             target_dir: "/shared".into(),
             kind: crate::scan::OutputKind::Target,
             shared: true,
+            volume: None,
             size: None,
             last_modified: None,
         };
         let rows = [shared.clone()];
         assert_eq!(project_label(&shared, &rows), "Shared Target Dir");
+    }
+
+    #[test]
+    fn volume_entries_carry_docker_label() {
+        let vol = TargetEntry {
+            project_path: "proj".into(),
+            target_dir: "/vols/v/proj/target".into(),
+            kind: crate::scan::OutputKind::Target,
+            shared: false,
+            volume: Some("v".to_string()),
+            size: None,
+            last_modified: None,
+        };
+        let rows = [vol.clone()];
+        assert_eq!(project_label(&vol, &rows), "proj [docker:v]");
     }
 }
