@@ -63,6 +63,7 @@ impl App {
                     project_path: found.project_path,
                     target_dir: found.target_dir,
                     kind: found.kind,
+                    shared: found.shared,
                     size: None,
                     last_modified: None,
                 }
@@ -183,6 +184,7 @@ impl App {
                     project_path: m.target_dir.clone(),
                     target_dir: m.target_dir.clone(),
                     kind: crate::scan::OutputKind::Target,
+                    shared: false,
                     size: Some(m.size),
                     last_modified: m.last_modified,
                 });

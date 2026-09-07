@@ -35,6 +35,19 @@ impl Resolver {
         }
     }
 
+    /// Test seam: no global or env layers, so disk fixtures fully
+    /// determine the result regardless of the machine's cargo setup.
+    #[cfg(test)]
+    pub fn hermetic() -> Self {
+        Self {
+            home: None,
+            cache: HashMap::new(),
+            env_target: None,
+            env_build: None,
+            cargo_home: cargo_home(),
+        }
+    }
+
     /// Candidate output dirs for a manifest dir, most specific last.
     ///
     /// Always includes the default `<manifest>/target` when it differs, so
@@ -53,19 +66,28 @@ impl Resolver {
         let has_default = std::fs::symlink_metadata(&default_target).is_ok_and(|md| md.is_dir());
         let mut target = None;
         let mut target_base = None;
+        let mut target_shared = false;
         let mut build = None;
         let mut build_base = None;
+        let mut build_shared = false;
         if let Some(home) = &self.home {
             target = home.target_dir.clone();
             target_base = Some(home.base.clone());
+            target_shared = home.target_dir.is_some();
             build = home.build_dir.clone();
             build_base = Some(home.base.clone());
+            build_shared = home.build_dir.is_some();
         }
         // Ancestors from the filesystem root down: deeper configs win.
         // Skipped when the default exists: the common case pays no config I/O.
         if !has_default {
             let chain: Vec<PathBuf> = manifest_dir.ancestors().map(|a| a.to_path_buf()).collect();
             for dir in chain.iter().rev() {
+                // The global file is already the lowest-precedence layer.
+                // Re-applying it here would also clear the shared flag.
+                if dir.join(".cargo") == self.cargo_home {
+                    continue;
+                }
                 if let Some(cfg) = self.config_for(dir) {
                     // Clone out before touching other cache entries.
                     let (t, b, base) = (
@@ -76,10 +98,12 @@ impl Resolver {
                     if t.is_some() {
                         target = t;
                         target_base = Some(base.clone());
+                        target_shared = false;
                     }
                     if b.is_some() {
                         build = b;
                         build_base = Some(base);
+                        build_shared = false;
                     }
                 }
             }
@@ -89,14 +113,16 @@ impl Resolver {
             manifest.clone(),
             default_target.clone(),
             OutputKind::Target,
+            false,
         )];
-        let push = |out: &mut Vec<DiscoveredEntry>, dir: PathBuf, kind: OutputKind| {
-            if !out.iter().any(|d| d.target_dir == dir) {
-                out.push(DiscoveredEntry::new(manifest.clone(), dir, kind));
-            }
-        };
+        let push =
+            |out: &mut Vec<DiscoveredEntry>, dir: PathBuf, kind: OutputKind, shared: bool| {
+                if !out.iter().any(|d| d.target_dir == dir) {
+                    out.push(DiscoveredEntry::new(manifest.clone(), dir, kind, shared));
+                }
+            };
         if let Some(raw) = self.env_target.clone() {
-            push(&mut out, raw, OutputKind::Target);
+            push(&mut out, raw, OutputKind::Target, false);
         } else if let Some(raw) = target
             && let Some(base) = target_base
         {
@@ -104,18 +130,25 @@ impl Resolver {
                 &mut out,
                 absolutize(&base, Path::new(&raw)),
                 OutputKind::Target,
+                target_shared,
             );
         }
         // `build.build-dir` defaults to the target dir, so only an explicit
         // value that templates cleanly and lands elsewhere adds a row.
-        let build = self.env_build.clone().or_else(|| {
-            build.and_then(|raw| {
-                build_base
-                    .and_then(|base| expand_build_dir(&raw, &base, manifest_dir, &self.cargo_home))
-            })
-        });
+        // Env wins over file configs, so an env dir is never shared.
+        let (build, env_build) = match self.env_build.clone() {
+            Some(dir) => (Some(dir), true),
+            None => (
+                build.and_then(|raw| {
+                    build_base.and_then(|base| {
+                        expand_build_dir(&raw, &base, manifest_dir, &self.cargo_home)
+                    })
+                }),
+                false,
+            ),
+        };
         if let Some(dir) = build {
-            push(&mut out, dir, OutputKind::Build);
+            push(&mut out, dir, OutputKind::Build, build_shared && !env_build);
         }
         out
     }
@@ -180,14 +213,17 @@ pub struct DiscoveredEntry {
     pub target_dir: PathBuf,
     /// Whether this dir came from `target-dir` or `build-dir`.
     pub kind: OutputKind,
+    /// True when the dir came from `$CARGO_HOME/config.toml`.
+    pub shared: bool,
 }
 
 impl DiscoveredEntry {
-    pub fn new(project_path: PathBuf, target_dir: PathBuf, kind: OutputKind) -> Self {
+    pub fn new(project_path: PathBuf, target_dir: PathBuf, kind: OutputKind, shared: bool) -> Self {
         Self {
             project_path,
             target_dir,
             kind,
+            shared,
         }
     }
 }
@@ -200,6 +236,7 @@ impl From<PathBuf> for DiscoveredEntry {
             project_path,
             target_dir,
             kind: OutputKind::Target,
+            shared: false,
         }
     }
 }
@@ -552,6 +589,138 @@ mod tests {
                 .any(|e| e.target_dir == Path::new("/custom-fast-xyz"))
         );
         assert_eq!(r.cached_files(), 0, "default target avoids config I/O");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    fn home_resolver(target: Option<&str>, build: Option<&str>) -> Resolver {
+        let mut r = Resolver::new();
+        r.cache.clear();
+        r.env_target = None;
+        r.env_build = None;
+        r.home = Some(ConfigFile {
+            base: PathBuf::from("/home/user/.cargo"),
+            target_dir: target.map(str::to_string),
+            build_dir: build.map(str::to_string),
+        });
+        r
+    }
+
+    #[test]
+    fn home_target_dir_marks_shared() {
+        let root = test_root("home-shared");
+        fs::create_dir_all(root.join("proj/target")).unwrap();
+        let mut r = home_resolver(Some("/shared-target"), None);
+        let dirs = r.resolve(&root.join("proj"));
+        let shared = dirs
+            .iter()
+            .find(|e| e.target_dir == Path::new("/shared-target"))
+            .expect("home target resolves");
+        assert!(shared.shared);
+        assert_eq!(shared.kind, OutputKind::Target);
+        let local = dirs
+            .iter()
+            .find(|e| e.target_dir == root.join("proj/target"))
+            .expect("default target stays");
+        assert!(!local.shared);
+        let _ = fs::remove_dir_all(&root);
+    }
+    #[test]
+    fn ancestor_walk_does_not_reapply_global_config() {
+        // cargo_home sits inside the test root, so the manifest's ancestor
+        // chain passes through its parent. Re-applying the global file
+        // there would clear the shared flag.
+        let root = test_root("home-reapply");
+        fs::create_dir_all(root.join(".cargo")).unwrap();
+        fs::write(
+            root.join(".cargo/config.toml"),
+            "[build]\ntarget-dir = \"/shared-target\"\nbuild-dir = \"/shared-build\"\n",
+        )
+        .unwrap();
+        // No local target: the full ancestor chain runs.
+        fs::create_dir_all(root.join("proj")).unwrap();
+        let mut r = Resolver {
+            home: Some(ConfigFile {
+                base: root.clone(),
+                target_dir: Some("/shared-target".to_string()),
+                build_dir: Some("/shared-build".to_string()),
+            }),
+            cache: HashMap::new(),
+            env_target: None,
+            env_build: None,
+            cargo_home: root.join(".cargo"),
+        };
+        let dirs = r.resolve(&root.join("proj"));
+        for want in ["/shared-target", "/shared-build"] {
+            let entry = dirs
+                .iter()
+                .find(|e| e.target_dir == Path::new(want))
+                .expect("home dir resolves");
+            assert!(entry.shared, "{want} stays shared");
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn home_build_dir_marks_shared() {
+        let root = test_root("home-shared-build");
+        fs::create_dir_all(root.join("proj/target")).unwrap();
+        let mut r = home_resolver(None, Some("/shared-build"));
+        let dirs = r.resolve(&root.join("proj"));
+        let shared = dirs
+            .iter()
+            .find(|e| e.target_dir == Path::new("/shared-build"))
+            .expect("home build resolves");
+        assert!(shared.shared);
+        assert_eq!(shared.kind, OutputKind::Build);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn project_override_clears_shared() {
+        let root = test_root("home-override");
+        fs::create_dir_all(root.join("proj/.cargo")).unwrap();
+        fs::write(
+            root.join("proj/.cargo/config.toml"),
+            "[build]\ntarget-dir = \"/inner\"\n",
+        )
+        .unwrap();
+        let mut r = home_resolver(Some("/outer"), None);
+        let dirs = r.resolve(&root.join("proj"));
+        assert!(dirs.iter().any(|e| e.target_dir == Path::new("/inner")));
+        let inner = dirs
+            .iter()
+            .find(|e| e.target_dir == Path::new("/inner"))
+            .expect("project target resolves");
+        assert!(!inner.shared);
+        assert!(!dirs.iter().any(|e| e.target_dir == Path::new("/outer")));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn env_target_wins_and_is_not_shared() {
+        let root = test_root("home-env");
+        fs::create_dir_all(root.join("proj/target")).unwrap();
+        let mut r = home_resolver(Some("/shared-target"), Some("/shared-build"));
+        r.env_target = Some(PathBuf::from("/env-target"));
+        r.env_build = Some(PathBuf::from("/env-build"));
+        let dirs = r.resolve(&root.join("proj"));
+        assert!(
+            !dirs
+                .iter()
+                .any(|e| e.target_dir == Path::new("/shared-target"))
+        );
+        assert!(
+            !dirs
+                .iter()
+                .any(|e| e.target_dir == Path::new("/shared-build"))
+        );
+        for want in ["/env-target", "/env-build"] {
+            let entry = dirs
+                .iter()
+                .find(|e| e.target_dir == Path::new(want))
+                .expect("env dir resolves");
+            assert!(!entry.shared);
+        }
         let _ = fs::remove_dir_all(&root);
     }
 }

@@ -26,6 +26,8 @@ pub struct TargetEntry {
     pub target_dir: PathBuf,
     /// Whether this dir came from `target-dir` or `build-dir`.
     pub kind: OutputKind,
+    /// True when the dir came from `$CARGO_HOME/config.toml`.
+    pub shared: bool,
     /// Disk usage of `target_dir` in bytes, `du` semantics. `None` while
     /// the size walk has not measured this entry yet.
     pub size: Option<u64>,
@@ -40,6 +42,17 @@ impl TargetEntry {
             .unwrap_or_default()
             .to_string_lossy()
             .into_owned()
+    }
+
+    /// Display name for a shared `$CARGO_HOME` dir, if this entry is one.
+    pub fn shared_label(&self) -> Option<&'static str> {
+        if !self.shared {
+            return None;
+        }
+        match self.kind {
+            OutputKind::Target => Some("Shared Target Dir"),
+            OutputKind::Build => Some("Shared Build Dir"),
+        }
     }
 }
 

@@ -51,7 +51,11 @@ struct Ctx {
 /// Find project/output pairs without measuring them.
 #[tracing::instrument(skip_all, fields(root = %root.display()))]
 pub fn discover(root: &Path) -> Vec<DiscoveredEntry> {
-    let mut resolver = Resolver::new();
+    discover_with(root, Resolver::new())
+}
+
+/// Test seam: disk fixtures fully determine the result.
+pub(crate) fn discover_with(root: &Path, mut resolver: Resolver) -> Vec<DiscoveredEntry> {
     let customs: HashSet<PathBuf> = resolver
         .outer_dirs(root)
         .into_iter()
@@ -112,7 +116,12 @@ pub fn discover(root: &Path) -> Vec<DiscoveredEntry> {
 
 /// Discover then measure, streaming progress over `tx`.
 pub fn scan_stream(root: &Path, tx: mpsc::Sender<ScanEvent>) {
-    let projects = discover(root);
+    scan_stream_with(root, tx, Resolver::new());
+}
+
+/// Test seam: disk fixtures fully determine the result.
+pub(crate) fn scan_stream_with(root: &Path, tx: mpsc::Sender<ScanEvent>, resolver: Resolver) {
+    let projects = discover_with(root, resolver);
     if tx.send(ScanEvent::Discovered(projects.clone())).is_err() {
         return;
     }
@@ -221,6 +230,16 @@ mod tests {
     use super::*;
     use std::fs;
     use std::time::{Duration, SystemTime};
+
+    /// Fixture-only discovery for tests: the machine's global cargo config
+    /// and env must not leak rows into exact-count assertions.
+    fn discover(root: &Path) -> Vec<DiscoveredEntry> {
+        discover_with(root, Resolver::hermetic())
+    }
+
+    fn scan_stream(root: &Path, tx: std::sync::mpsc::Sender<ScanEvent>) {
+        scan_stream_with(root, tx, Resolver::hermetic())
+    }
 
     fn setup_tree(name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!("cargo-shepherd-test-{name}"));

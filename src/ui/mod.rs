@@ -119,10 +119,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                 } else {
                     Style::default()
                 };
-                let mut spans = vec![Span::styled(e.project_name(), base)];
-                if let Some((label, color)) = output_suffix(e, &app.entries) {
-                    spans.push(Span::styled(label, Style::default().fg(color)));
-                }
+                let spans = project_spans(e, &app.entries, base);
                 let name = Text::from(Line::from(spans));
                 let mut size_text = match e.size {
                     Some(_) => Text::styled(format_size_opt(e.size), size_style(e.size)),
@@ -300,6 +297,27 @@ pub(crate) fn output_suffix(
                 && other.target_dir != entry.target_dir
         })
         .then_some((label, color))
+}
+
+/// Project cell: shared `$CARGO_HOME` dirs show their special name in the
+/// per-kind highlight color, otherwise the project name plus kind suffix.
+pub(crate) fn project_spans(
+    entry: &crate::scan::TargetEntry,
+    entries: &[crate::scan::TargetEntry],
+    base: Style,
+) -> Vec<Span<'static>> {
+    if let Some(shared) = entry.shared_label() {
+        let color = match entry.kind {
+            crate::scan::OutputKind::Target => Color::Green,
+            crate::scan::OutputKind::Build => Color::Blue,
+        };
+        return vec![Span::styled(shared, base.fg(color))];
+    }
+    let mut spans = vec![Span::styled(entry.project_name(), base)];
+    if let Some((label, color)) = output_suffix(entry, entries) {
+        spans.push(Span::styled(label, Style::default().fg(color)));
+    }
+    spans
 }
 
 /// Timestamp for display; pending entries read as `-`, deleted as "deleted".
@@ -490,6 +508,7 @@ mod tests {
             project_path: std::path::PathBuf::from("proj-a"),
             target_dir: std::path::PathBuf::from("proj-a/target"),
             kind: crate::scan::OutputKind::Target,
+            shared: false,
             size: None,
             last_modified: None,
         };
@@ -502,6 +521,7 @@ mod tests {
             project_path: std::path::PathBuf::from("proj"),
             target_dir: std::path::PathBuf::from(dir),
             kind,
+            shared: false,
             size: None,
             last_modified: None,
         };
@@ -526,6 +546,7 @@ mod tests {
             project_path: std::path::PathBuf::from("proj"),
             target_dir: std::path::PathBuf::from("proj/target"),
             kind: OutputKind::Target,
+            shared: false,
             size: None,
             last_modified: None,
         };
@@ -536,6 +557,55 @@ mod tests {
             ..only.clone()
         };
         assert_eq!(output_suffix(&only, &[only.clone(), dup]), None);
+    }
+    #[test]
+    fn shared_entries_use_special_names() {
+        use crate::scan::{OutputKind, TargetEntry};
+        let shared = |kind: OutputKind| TargetEntry {
+            project_path: std::path::PathBuf::from("proj"),
+            target_dir: std::path::PathBuf::from("/shared"),
+            kind,
+            shared: true,
+            size: None,
+            last_modified: None,
+        };
+        assert_eq!(
+            shared(OutputKind::Target).shared_label(),
+            Some("Shared Target Dir")
+        );
+        assert_eq!(
+            shared(OutputKind::Build).shared_label(),
+            Some("Shared Build Dir")
+        );
+        let plain = TargetEntry {
+            shared: false,
+            ..shared(OutputKind::Target)
+        };
+        assert_eq!(plain.shared_label(), None);
+    }
+
+    #[test]
+    fn shared_cells_render_name_in_per_kind_color() {
+        use crate::scan::{OutputKind, TargetEntry};
+        use ratatui::style::Style;
+        let entry = |kind: OutputKind| TargetEntry {
+            project_path: std::path::PathBuf::from("proj"),
+            target_dir: std::path::PathBuf::from("/shared"),
+            kind,
+            shared: true,
+            size: None,
+            last_modified: None,
+        };
+        let target = entry(OutputKind::Target);
+        let spans = project_spans(&target, std::slice::from_ref(&target), Style::default());
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content.as_ref(), "Shared Target Dir");
+        assert_eq!(spans[0].style.fg, Some(Color::Green));
+        let build = entry(OutputKind::Build);
+        let spans = project_spans(&build, std::slice::from_ref(&build), Style::default());
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content.as_ref(), "Shared Build Dir");
+        assert_eq!(spans[0].style.fg, Some(Color::Blue));
     }
 
     #[test]

@@ -30,6 +30,7 @@ pub fn build_cache_entry_at(path: &Path) -> Option<TargetEntry> {
         project_path: path.to_path_buf(),
         target_dir: path.to_path_buf(),
         kind: super::OutputKind::Target,
+        shared: false,
         size: Some(size),
         last_modified,
     })

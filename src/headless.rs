@@ -28,6 +28,9 @@ fn collect(root: &Path) -> App {
 }
 
 fn project_label(entry: &TargetEntry, entries: &[TargetEntry]) -> String {
+    if let Some(shared) = entry.shared_label() {
+        return shared.to_string();
+    }
     let suffix = output_suffix(entry, entries)
         .map(|(label, _)| label)
         .unwrap_or("");
@@ -324,6 +327,7 @@ mod tests {
             project_path: "proj".into(),
             target_dir: "proj/target".into(),
             kind: crate::scan::OutputKind::Target,
+            shared: false,
             size,
             last_modified: age.map(|a| SystemTime::now() - a),
         }
@@ -371,5 +375,19 @@ mod tests {
             Some(Duration::from_secs(30 * 86_400)),
             None
         ));
+    }
+
+    #[test]
+    fn shared_entries_list_under_special_name() {
+        let shared = TargetEntry {
+            project_path: "proj".into(),
+            target_dir: "/shared".into(),
+            kind: crate::scan::OutputKind::Target,
+            shared: true,
+            size: None,
+            last_modified: None,
+        };
+        let rows = [shared.clone()];
+        assert_eq!(project_label(&shared, &rows), "Shared Target Dir");
     }
 }
