@@ -16,6 +16,7 @@ Cargo storage management CLI/TUI
 * `clean` command with reasonable defaults
 * Support for `.cargo/config.toml` overrides. (best effort)
 * Support for both Cargo `build-dir` and `target-dir`
+* Optional `--docker` flag to also scan locally accessible Docker/Podman named volumes
 
 
 ## Installation
@@ -35,6 +36,10 @@ cargo storage list
 
 # Clean the target directories (defaults to older than 30d AND at least 100MB)
 cargo storage clean
+
+# Also scan Docker/Podman named volumes (needs read access to the volume
+# mountpoints; use sudo for rootful Docker)
+cargo shepherd list --docker
 
 # Run --help to see more options
 cargo storage --help

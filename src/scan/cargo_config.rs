@@ -215,6 +215,8 @@ pub struct DiscoveredEntry {
     pub kind: OutputKind,
     /// True when the dir came from `$CARGO_HOME/config.toml`.
     pub shared: bool,
+    /// Containing volume name for `--docker` hits, else `None`.
+    pub volume: Option<String>,
 }
 
 impl DiscoveredEntry {
@@ -224,10 +226,10 @@ impl DiscoveredEntry {
             target_dir,
             kind,
             shared,
+            volume: None,
         }
     }
 }
-
 /// Bare manifest dirs default to a sibling `target/`.
 impl From<PathBuf> for DiscoveredEntry {
     fn from(project_path: PathBuf) -> Self {
@@ -237,6 +239,7 @@ impl From<PathBuf> for DiscoveredEntry {
             target_dir,
             kind: OutputKind::Target,
             shared: false,
+            volume: None,
         }
     }
 }
