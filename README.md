@@ -4,7 +4,7 @@
 [![Crates.io](https://img.shields.io/crates/v/cargo-storage.svg)](https://crates.io/crates/cargo-storage)
 [![MIT licensed](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/ranger-ross/reqwest-metrics/blob/master/LICENSE)
 
-Cargo `target` directory management CLI/TUI
+Cargo storage management CLI/TUI
 
 <img src="assets/demo.gif" width="800" alt="demo" />
 
