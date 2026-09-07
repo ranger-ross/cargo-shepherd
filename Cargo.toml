@@ -1,6 +1,6 @@
 [package]
 name = "cargo-storage"
-description = "Cargo `target` directory management CLI/TUI"
+description = "Cargo storage management CLI/TUI"
 version = "0.2.0"
 edition = "2024"
 authors = ["Ross Sullivan <rosssullivan101@gmail.com>"]
