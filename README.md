@@ -1,7 +1,7 @@
-# Cargo Shepherd
+# Cargo Storage
 
-[![CI Status](https://github.com/ranger-ross/cargo-shepherd/workflows/Test/badge.svg)](https://github.com/ranger-ross/cargo-shepherd/actions)
-[![Crates.io](https://img.shields.io/crates/v/cargo-shepherd.svg)](https://crates.io/crates/cargo-shepherd)
+[![CI Status](https://github.com/ranger-ross/cargo-storage/workflows/Test/badge.svg)](https://github.com/ranger-ross/cargo-storage/actions)
+[![Crates.io](https://img.shields.io/crates/v/cargo-storage.svg)](https://crates.io/crates/cargo-storage)
 [![MIT licensed](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/ranger-ross/reqwest-metrics/blob/master/LICENSE)
 
 Cargo `target` directory management CLI/TUI
@@ -21,23 +21,23 @@ Cargo `target` directory management CLI/TUI
 ## Installation
 
 ```shell
-cargo install cargo-shepherd
+cargo install cargo-storage
 ```
 
 ## Usage
 
 ```shell
 # Open the management TUI
-cargo shepherd
+cargo storage
 
 # List the target directories w/o the TUI
-cargo shepherd list
+cargo storage list
 
 # Clean the target directories (defaults to older than 30d AND at least 100MB)
-cargo shepherd clean
+cargo storage clean
 
 # Run --help to see more options
-cargo shepherd --help
+cargo storage --help
 ```
 
 ## Motivation / Scope

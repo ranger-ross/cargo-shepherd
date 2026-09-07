@@ -207,7 +207,7 @@ mod tests {
     /// Backing dirs for cases. Created (never written), so live dirs
     /// measure `Some` and the never-created `proj-gone` measures `None`.
     fn test_root() -> PathBuf {
-        std::env::temp_dir().join("cargo-shepherd-test-poll")
+        std::env::temp_dir().join("cargo-storage-test-poll")
     }
 
     fn target_dir(proj: &str) -> PathBuf {

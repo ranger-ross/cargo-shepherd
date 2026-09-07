@@ -44,7 +44,7 @@ mod tests {
 
     #[test]
     fn build_cache_entry_measures_present_dir() {
-        let root = std::env::temp_dir().join("cargo-shepherd-test-build-cache");
+        let root = std::env::temp_dir().join("cargo-storage-test-build-cache");
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("build-cache/content")).unwrap();
         fs::write(root.join("build-cache/content/blob.bin"), "12345678").unwrap();
@@ -62,7 +62,7 @@ mod tests {
 
     #[test]
     fn build_cache_entry_missing_dir_is_none() {
-        let root = std::env::temp_dir().join("cargo-shepherd-test-build-cache-missing");
+        let root = std::env::temp_dir().join("cargo-storage-test-build-cache-missing");
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         assert!(build_cache_entry_at(&root.join("build-cache")).is_none());

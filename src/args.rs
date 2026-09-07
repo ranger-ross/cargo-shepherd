@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
-#[command(name = "cargo-shepherd", about = "Cargo target directory management")]
+#[command(name = "cargo-storage", about = "Cargo target directory management")]
 pub struct Args {
     /// Directory to scan. Defaults to the home directory.
     pub root: Option<PathBuf>,
@@ -50,7 +50,7 @@ pub enum Command {
 impl Args {
     pub fn parse_args() -> Self {
         let mut argv: Vec<String> = std::env::args().collect();
-        if argv.get(1).is_some_and(|a| a == "shepherd") {
+        if argv.get(1).is_some_and(|a| a == "storage") {
             argv.remove(1);
         }
         <Self as Parser>::parse_from(argv)

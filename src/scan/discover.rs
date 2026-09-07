@@ -242,7 +242,7 @@ mod tests {
     }
 
     fn setup_tree(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("cargo-shepherd-test-{name}"));
+        let root = std::env::temp_dir().join(format!("cargo-storage-test-{name}"));
         let _ = fs::remove_dir_all(&root);
         // Real project with a target dir.
         fs::create_dir_all(root.join("proj-a/target")).unwrap();
@@ -280,7 +280,7 @@ mod tests {
 
     #[test]
     fn custom_target_dir_found_without_local_target() {
-        let root = std::env::temp_dir().join("cargo-shepherd-test-custom-target");
+        let root = std::env::temp_dir().join("cargo-storage-test-custom-target");
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("proj/.cargo")).unwrap();
         fs::write(root.join("proj/Cargo.toml"), "[package]\n").unwrap();
@@ -301,7 +301,7 @@ mod tests {
 
     #[test]
     fn build_dir_adds_a_second_row() {
-        let root = std::env::temp_dir().join("cargo-shepherd-test-build-dir");
+        let root = std::env::temp_dir().join("cargo-storage-test-build-dir");
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("proj/.cargo")).unwrap();
         fs::write(root.join("proj/Cargo.toml"), "[package]\n").unwrap();
@@ -332,7 +332,7 @@ mod tests {
     }
     #[test]
     fn workspace_members_sharing_one_target_collapse_to_one_row() {
-        let root = std::env::temp_dir().join("cargo-shepherd-test-shared-target");
+        let root = std::env::temp_dir().join("cargo-storage-test-shared-target");
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("proj/.cargo")).unwrap();
         fs::write(root.join("proj/Cargo.toml"), "[workspace]\n").unwrap();
@@ -359,7 +359,7 @@ mod tests {
 
     #[test]
     fn stale_default_target_still_listed_next_to_custom() {
-        let root = std::env::temp_dir().join("cargo-shepherd-test-stale-default");
+        let root = std::env::temp_dir().join("cargo-storage-test-stale-default");
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("proj/.cargo")).unwrap();
         fs::write(root.join("proj/Cargo.toml"), "[package]\n").unwrap();
@@ -380,7 +380,7 @@ mod tests {
 
     #[test]
     fn missing_custom_dir_reports_nothing() {
-        let root = std::env::temp_dir().join("cargo-shepherd-test-missing-custom");
+        let root = std::env::temp_dir().join("cargo-storage-test-missing-custom");
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("proj/.cargo")).unwrap();
         fs::write(root.join("proj/Cargo.toml"), "[package]\n").unwrap();
@@ -396,7 +396,7 @@ mod tests {
 
     #[test]
     fn nested_workspace_member_is_found() {
-        let root = std::env::temp_dir().join("cargo-shepherd-test-nested");
+        let root = std::env::temp_dir().join("cargo-storage-test-nested");
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("workspace/member/target")).unwrap();
         fs::write(root.join("workspace/Cargo.toml"), "[workspace]\n").unwrap();
@@ -420,7 +420,7 @@ mod tests {
 
     #[test]
     fn gitignored_dirs_are_skipped_but_gitignored_targets_still_measure() {
-        let root = std::env::temp_dir().join("cargo-shepherd-test-gitignore");
+        let root = std::env::temp_dir().join("cargo-storage-test-gitignore");
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         fs::write(root.join(".gitignore"), "ignored/\ntarget/\n").unwrap();

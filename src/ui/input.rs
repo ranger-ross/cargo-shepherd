@@ -145,7 +145,7 @@ mod tests {
 
     #[test]
     fn d_deletes_selected_target() {
-        let root = std::env::temp_dir().join("cargo-shepherd-test-input-delete");
+        let root = std::env::temp_dir().join("cargo-storage-test-input-delete");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("proj/target")).unwrap();
         let mut app = App::new(root.clone());
@@ -160,7 +160,7 @@ mod tests {
 
     #[test]
     fn d_while_filtering_types_instead_of_deleting() {
-        let root = std::env::temp_dir().join("cargo-shepherd-test-input-delete-filter");
+        let root = std::env::temp_dir().join("cargo-storage-test-input-delete-filter");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("proj/target")).unwrap();
         let mut app = App::new(root.clone());

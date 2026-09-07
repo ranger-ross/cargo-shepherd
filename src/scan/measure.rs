@@ -117,7 +117,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn hardlinked_file_counts_once_like_du() {
-        let root = std::env::temp_dir().join("cargo-shepherd-test-hardlink");
+        let root = std::env::temp_dir().join("cargo-storage-test-hardlink");
         let _ = fs::remove_dir_all(&root);
         let target = root.join("target");
         fs::create_dir_all(&target).unwrap();
@@ -138,7 +138,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn symlinks_and_ignores_do_not_skew_measure() {
-        let root = std::env::temp_dir().join("cargo-shepherd-test-measure-parity");
+        let root = std::env::temp_dir().join("cargo-storage-test-measure-parity");
         let _ = fs::remove_dir_all(&root);
         let target = root.join("target");
         fs::create_dir_all(target.join("sub")).unwrap();
@@ -163,7 +163,7 @@ mod tests {
 
     #[test]
     fn newest_mtime_tracks_deep_writes() {
-        let root = std::env::temp_dir().join("cargo-shepherd-test-measure-mtime");
+        let root = std::env::temp_dir().join("cargo-storage-test-measure-mtime");
         let _ = fs::remove_dir_all(&root);
         let deep = root.join("target/a/b");
         fs::create_dir_all(&deep).unwrap();

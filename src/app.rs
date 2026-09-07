@@ -537,7 +537,7 @@ mod tests {
     #[test]
     fn deleted_and_recreated_dir_zeroes_then_restores_row() {
         use crate::scan::measure_target;
-        let root = std::env::temp_dir().join("cargo-shepherd-test-recreate");
+        let root = std::env::temp_dir().join("cargo-storage-test-recreate");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("proj/target")).unwrap();
         let mut app = App::new(root.clone());
@@ -568,7 +568,7 @@ mod tests {
     #[test]
     fn first_cache_measurement_creates_entry() {
         use crate::scan::measure_target;
-        let root = std::env::temp_dir().join("cargo-shepherd-test-cache-arrival");
+        let root = std::env::temp_dir().join("cargo-storage-test-cache-arrival");
         let _ = std::fs::remove_dir_all(&root);
         let mut app = app_with_entries();
         app.build_cache = None;
@@ -633,7 +633,7 @@ mod tests {
 
     #[test]
     fn delete_selected_removes_target_and_zeroes_row() {
-        let root = std::env::temp_dir().join("cargo-shepherd-test-delete");
+        let root = std::env::temp_dir().join("cargo-storage-test-delete");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("proj/target")).unwrap();
         std::fs::write(root.join("proj/target/a.bin"), "1234").unwrap();
@@ -656,7 +656,7 @@ mod tests {
 
     #[test]
     fn delete_selected_follows_filtered_selection() {
-        let root = std::env::temp_dir().join("cargo-shepherd-test-delete-filter");
+        let root = std::env::temp_dir().join("cargo-storage-test-delete-filter");
         let _ = std::fs::remove_dir_all(&root);
         for proj in ["proj-a", "proj-b"] {
             std::fs::create_dir_all(root.join(proj).join("target")).unwrap();

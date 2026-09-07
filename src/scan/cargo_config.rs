@@ -434,7 +434,7 @@ mod tests {
     use std::fs;
 
     fn test_root(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("cargo-shepherd-test-cfg-{name}"));
+        let root = std::env::temp_dir().join(format!("cargo-storage-test-cfg-{name}"));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         root

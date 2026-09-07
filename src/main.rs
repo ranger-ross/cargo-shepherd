@@ -68,7 +68,7 @@ fn main() -> Result<()> {
         }
         Some(Command::Completions { shell }) => {
             let mut cmd = Args::command();
-            generate(*shell, &mut cmd, "cargo-shepherd", &mut std::io::stdout());
+            generate(*shell, &mut cmd, "cargo-storage", &mut std::io::stdout());
             return Ok(());
         }
     };
