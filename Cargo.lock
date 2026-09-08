@@ -196,7 +196,7 @@ checksum = "95832e849adfb21180ccb6826a99da14e5d266ae5c2e668e1602cf234f153797"
 
 [[package]]
 name = "cargo-storage"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bytefmt",
  "clap",
