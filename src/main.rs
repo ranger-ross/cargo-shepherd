@@ -104,6 +104,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, root: PathBuf
     let mut app = App::new(root.clone());
     let mut scan_rx = spawn_scan(&root);
     let mut poller = Poller::new();
+    let delete_worker = DeleteWorker::new();
 
     loop {
         let _frame = tracing::info_span!("frame").entered();
@@ -135,6 +136,10 @@ fn run(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, root: PathBuf
             }
         }
 
+        for done in delete_worker.drain() {
+            app.finish_delete(done.target_dir, done.result);
+        }
+
         poller.poll(&mut app);
         // 60fps while loading, 10fps otherwise.
         let frame_budget = if app.scanning {
@@ -146,7 +151,11 @@ fn run(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, root: PathBuf
             match event::read().wrap_err("reading terminal event")? {
                 Event::Key(key) => match handle_key(&mut app, key) {
                     Action::Continue => {}
-                    Action::Delete => app.delete_selected(),
+                    Action::Delete => {
+                        if let Some(target_dir) = app.begin_delete() {
+                            delete_worker.enqueue(target_dir);
+                        }
+                    }
                     Action::Quit => return Ok(()),
                     Action::Rescan => {
                         app.begin_scan();
@@ -169,4 +178,36 @@ fn spawn_scan(root: &Path) -> Option<mpsc::Receiver<scan::ScanEvent>> {
         scan::scan_stream(&root, tx);
     });
     Some(rx)
+}
+
+struct DeleteDone {
+    target_dir: PathBuf,
+    result: std::io::Result<()>,
+}
+
+struct DeleteWorker {
+    tx: mpsc::Sender<PathBuf>,
+    rx: mpsc::Receiver<DeleteDone>,
+}
+
+impl DeleteWorker {
+    fn new() -> Self {
+        let (tx, requests) = mpsc::channel();
+        let (results, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            while let Ok(target_dir) = requests.recv() {
+                let result = std::fs::remove_dir_all(&target_dir);
+                let _ = results.send(DeleteDone { target_dir, result });
+            }
+        });
+        Self { tx, rx }
+    }
+
+    fn enqueue(&self, target_dir: PathBuf) {
+        let _ = self.tx.send(target_dir);
+    }
+
+    fn drain(&self) -> impl Iterator<Item = DeleteDone> + '_ {
+        std::iter::from_fn(|| self.rx.try_recv().ok())
+    }
 }
