@@ -147,6 +147,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, root: PathBuf
             match event::read().wrap_err("reading terminal event")? {
                 Event::Key(key) => match handle_key(&mut app, key) {
                     Action::Continue => {}
+                    Action::Delete => app.delete_selected(),
                     Action::Quit => return Ok(()),
                     Action::Rescan => {
                         app.begin_scan();
