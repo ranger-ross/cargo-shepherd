@@ -25,3 +25,6 @@ rayon = "1.12.0"
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 homedir = "0.3.6"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+mdquery-rs = "0.2.1"

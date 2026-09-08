@@ -4,6 +4,10 @@
 //! when a parent ignore file prunes them. Projects with
 //! `build.target-dir` / `build.build-dir` in `.cargo/config.toml` report
 //! those dirs instead of `target/`.
+//!
+//! On macOS, discovery can use Spotlight (`mdquery-rs`) to find `Cargo.toml`
+//! files quickly, then filter them to match walk semantics. Set
+//! `CARGO_STORAGE_SPOTLIGHT=0` to force the filesystem walk.
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
@@ -14,16 +18,20 @@ use std::{
     },
 };
 
-use ignore::{DirEntry, WalkBuilder, WalkState};
+use ignore::{DirEntry, IncrementalIgnore, WalkBuilder, WalkState};
 use rayon::prelude::*;
 
 use crate::util::cpu_count;
 
 use super::{
     TargetEntry,
-    cargo_config::{DiscoveredEntry, Resolver},
+    cargo_config::{DiscoveredEntry, OutputKind, Resolver},
     measure::{Measurement, measure_target},
 };
+
+#[cfg(target_os = "macos")]
+#[path = "spotlight.rs"]
+mod spotlight;
 
 /// Scan progress messages, sent from the background thread.
 #[derive(Clone, Debug)]
@@ -37,7 +45,7 @@ pub enum ScanEvent {
 }
 
 /// Shared walk state: config cache, known output dirs, manifest dirs.
-struct Ctx {
+pub(crate) struct Ctx {
     resolver: Mutex<Resolver>,
     /// Non-default output dirs to skip descending into. Defaults
     /// (`<proj>/target`) are pruned by name in `keep_entry`, so this stays
@@ -136,8 +144,17 @@ fn walk_ctx(root: &Path, mut resolver: Resolver) -> Arc<Ctx> {
         manifests: Mutex::new(Vec::new()),
         repos: Mutex::new(Vec::new()),
     });
-    run_walk(root, &ctx);
+    run_collect(root, &ctx);
     ctx
+}
+
+/// Discover manifests under `root`, preferring Spotlight on macOS.
+fn run_collect(root: &Path, ctx: &Arc<Ctx>) {
+    #[cfg(target_os = "macos")]
+    if spotlight::collect(root, ctx) {
+        return;
+    }
+    run_walk(root, ctx);
 }
 
 /// Resolve collected manifests into one row per output dir.
@@ -150,13 +167,28 @@ fn finish(ctx: Arc<Ctx>) -> Vec<DiscoveredEntry> {
         repos: _,
     } = Arc::try_unwrap(ctx).map_err(|_| ()).expect("walk done");
     let manifests = manifests.into_inner().unwrap_or_default();
+    let local_targets: HashSet<PathBuf> = manifests
+        .iter()
+        .filter(|m| is_target_dir(&m.join("target")))
+        .cloned()
+        .collect();
     let mut resolver = resolver.into_inner().unwrap_or_else(|_| Resolver::new());
     let mut entries = Vec::new();
     for manifest in &manifests {
         for entry in resolver.resolve(manifest) {
-            if is_target_dir(&entry.target_dir) {
-                entries.push(entry);
+            if !is_target_dir(&entry.target_dir) {
+                continue;
             }
+            // Global `$CARGO_HOME` `build-dir` duplicates dedup unpredictably
+            // when discovery order differs (walk vs Spotlight). A local
+            // `target/` is enough for these projects.
+            if entry.kind == OutputKind::Build
+                && entry.shared
+                && local_targets.contains(&entry.project_path)
+            {
+                continue;
+            }
+            entries.push(entry);
         }
     }
     entries.sort_by(|a, b| {
@@ -334,16 +366,27 @@ fn visit_entry(result: Result<DirEntry, ignore::Error>, ctx: &Ctx) -> WalkState 
         return WalkState::Continue;
     }
     let dir = entry.path();
+    record_repo_if_present(dir, ctx);
+    record_manifest_dir(dir, ctx);
+    WalkState::Continue
+}
+
+/// Whether `dir` holds a git checkout marker.
+pub(crate) fn record_repo_if_present(dir: &Path, ctx: &Ctx) {
     // Any checkout (main or linked) advertises its repo with `.git`.
     // Repos seen here are queried for linked worktrees after the walk,
     // so ancestor scans find worktrees of nested repos too.
-    if std::fs::symlink_metadata(dir.join(".git")).is_ok() {
-        if let Ok(mut repos) = ctx.repos.lock() {
-            repos.push(dir.to_path_buf());
-        }
+    if std::fs::symlink_metadata(dir.join(".git")).is_ok()
+        && let Ok(mut repos) = ctx.repos.lock()
+    {
+        repos.push(dir.to_path_buf());
     }
+}
+
+/// Record one manifest dir and register any custom output dirs for pruning.
+pub(crate) fn record_manifest_dir(dir: &Path, ctx: &Ctx) {
     if !is_manifest_dir(dir) {
-        return WalkState::Continue;
+        return;
     }
     // Fast path: a local `target/` is pruned by name and needs no config
     // I/O, so record the manifest without touching the resolver or customs
@@ -372,7 +415,58 @@ fn visit_entry(result: Result<DirEntry, ignore::Error>, ctx: &Ctx) -> WalkState 
     if let Ok(mut manifests) = ctx.manifests.lock() {
         manifests.push(dir.to_path_buf());
     }
-    WalkState::Continue
+}
+
+/// Ignore matcher mirroring [`run_walk`] gitignore settings.
+pub(crate) fn build_ignore_matcher(root: &Path) -> IncrementalIgnore {
+    WalkBuilder::new(root)
+        .hidden(false)
+        .require_git(false)
+        .build_matchers()
+        .into_iter()
+        .next()
+        .expect("walk builder always yields one matcher")
+}
+
+/// Whether a walk rooted at `root` would reach `manifest_dir`.
+pub(crate) fn spotlight_path_ok(
+    root: &Path,
+    manifest_dir: &Path,
+    ctx: &Ctx,
+    matcher: &mut IncrementalIgnore,
+) -> bool {
+    let rel = manifest_dir.strip_prefix(root).unwrap_or(manifest_dir);
+    if rel.as_os_str().is_empty() {
+        return is_manifest_dir(manifest_dir);
+    }
+    let mut current = PathBuf::new();
+    for component in rel.components() {
+        current.push(component);
+        let name = component.as_os_str().to_str();
+        if matches!(name, Some(".git" | ".cargo")) {
+            return false;
+        }
+        if name == Some("target") {
+            let full = root.join(&current);
+            if is_project_target(&full) {
+                return false;
+            }
+        }
+        if ctx.has_customs.load(Ordering::Relaxed) {
+            let full = root.join(&current);
+            if is_under_customs(ctx, &full) && !is_manifest_dir(&full) {
+                return false;
+            }
+        }
+        if matcher.matched(&current, true).is_ignore() {
+            return false;
+        }
+    }
+    true
+}
+
+pub(crate) fn is_symlink_dir(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|md| md.file_type().is_symlink())
 }
 
 /// Whether `path` is a real output dir. Symlinks never count.
