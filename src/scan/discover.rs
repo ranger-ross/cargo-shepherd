@@ -148,6 +148,9 @@ fn drain_measure(ctx: &Arc<Ctx>, done: &AtomicBool, out: &Mutex<HashMap<PathBuf,
             for entry in &entries {
                 if !is_target_dir(&entry.target_dir)
                     || out.lock().is_ok_and(|o| o.contains_key(&entry.target_dir))
+                    || (entry.kind == OutputKind::Build
+                        && entry.shared
+                        && is_target_dir(&entry.project_path.join("target")))
                 {
                     continue;
                 }
@@ -741,6 +744,34 @@ mod tests {
         assert_eq!(build.target_dir, shared_build);
         assert_eq!(build.project_path, root.join("no-target"));
         assert!(build.shared);
+        let _ = fs::remove_dir_all(&root);
+    }
+    #[test]
+    fn measured_skips_inherited_shared_build_dir_with_local_target() {
+        let root = std::env::temp_dir().join("cargo-storage-test-measured-shared-build");
+        let _ = fs::remove_dir_all(&root);
+        let shared_build = root.join("shared-build");
+        fs::create_dir_all(root.join("proj/target")).unwrap();
+        fs::write(root.join("proj/Cargo.toml"), "[package]\n").unwrap();
+        fs::write(root.join("proj/target/blob.bin"), "hello").unwrap();
+        fs::create_dir_all(&shared_build).unwrap();
+        fs::write(shared_build.join("blob.bin"), "world").unwrap();
+
+        let resolver = Resolver::with_home_build_dir(shared_build.to_string_lossy());
+        let (entries, measurements) = discover_measured_with(&root, resolver, true);
+        assert_eq!(entries.len(), 1, "local target wins: {entries:?}");
+        assert_eq!(entries[0].target_dir, root.join("proj/target"));
+        assert!(
+            !measurements.iter().any(|m| m.target_dir == shared_build),
+            "shared dir not measured: {measurements:?}"
+        );
+        assert_eq!(
+            measurements
+                .iter()
+                .map(|m| m.target_dir.clone())
+                .collect::<Vec<_>>(),
+            vec![root.join("proj/target")]
+        );
         let _ = fs::remove_dir_all(&root);
     }
 
