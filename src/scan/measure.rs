@@ -1,12 +1,11 @@
 use std::{
-    collections::HashSet,
     path::{Path, PathBuf},
-    sync::{
-        Mutex,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, SystemTime},
 };
+
+#[cfg(unix)]
+use std::{collections::HashSet, sync::Mutex};
 
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
@@ -148,7 +147,6 @@ fn mtime_ns(md: &std::fs::Metadata) -> u64 {
 mod tests {
     use super::*;
     use std::fs;
-    use std::time::SystemTime;
 
     // Dedup relies on inode identity, which only Unix exposes.
     #[cfg(unix)]
