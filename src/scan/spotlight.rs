@@ -1,9 +1,10 @@
-//! macOS Spotlight fast path for `Cargo.toml` discovery.
+//! macOS Spotlight prefetch for `Cargo.toml` discovery.
 //!
-//! Replaces the parallel filesystem walk when the metadata index can answer
-//! `name == Cargo.toml` quickly. Results are filtered to match walk semantics
-//! (gitignores, `.git`/`.cargo` pruning, custom output dirs). On query failure,
-//! an empty index, or `CARGO_STORAGE_SPOTLIGHT=0`, discovery falls back to walk.
+//! Queries the metadata index for `Cargo.toml` files under `root`, filters
+//! hits to match walk semantics (gitignores, `.git`/`.cargo` pruning, custom
+//! output dirs), and records accepted manifest dirs. The filesystem walk in
+//! [`super::run_collect`] remains authoritative unless
+//! `CARGO_STORAGE_SPOTLIGHT_ONLY=1` opts into indexed-only discovery.
 
 use std::path::{Component, Path};
 use std::sync::Arc;
@@ -15,14 +16,16 @@ use super::{
     spotlight_path_ok,
 };
 
-/// Env var disabling the Spotlight fast path (`0`, `false`, `no`, `off`).
+/// Env var disabling the Spotlight prefetch (`0`, `false`, `no`, `off`).
 pub(crate) const ENV_DISABLE: &str = "CARGO_STORAGE_SPOTLIGHT";
+/// Env var skipping the filesystem walk when the prefetch accepted hits.
+pub(crate) const ENV_ONLY: &str = "CARGO_STORAGE_SPOTLIGHT_ONLY";
 
-/// Collect manifest dirs under `root` via Spotlight. Returns `true` when the
-/// index was queried and at least one candidate was accepted.
+/// Query Spotlight for `Cargo.toml` under `root` and record accepted manifests.
+/// Returns `true` when at least one candidate was accepted.
 pub(crate) fn collect(root: &Path, ctx: &Arc<Ctx>) -> bool {
     if spotlight_disabled() {
-        tracing::debug!("spotlight discovery disabled by {ENV_DISABLE}");
+        tracing::debug!("spotlight prefetch disabled by {ENV_DISABLE}");
         return false;
     }
     let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
@@ -30,15 +33,15 @@ pub(crate) fn collect(root: &Path, ctx: &Arc<Ctx>) -> bool {
         .name_is("Cargo.toml")
         .build(vec![MDQueryScope::Custom(root.clone())], None);
     let Ok(query) = query else {
-        tracing::debug!("spotlight query build failed, falling back to walk");
+        tracing::debug!("spotlight query build failed");
         return false;
     };
     let Ok(results) = query.execute() else {
-        tracing::debug!("spotlight query failed, falling back to walk");
+        tracing::debug!("spotlight query failed");
         return false;
     };
     if results.is_empty() {
-        tracing::debug!("spotlight returned no Cargo.toml files, falling back to walk");
+        tracing::debug!("spotlight returned no Cargo.toml files");
         return false;
     }
 
@@ -75,25 +78,52 @@ pub(crate) fn collect(root: &Path, ctx: &Arc<Ctx>) -> bool {
     if accepted == 0 {
         tracing::debug!(
             count = indexed,
-            "spotlight hits were all filtered out, falling back to walk"
+            "spotlight hits were all filtered out"
         );
         return false;
     }
-    tracing::info!(indexed, accepted, "spotlight discovery complete");
+    tracing::info!(indexed, accepted, "spotlight prefetch complete");
     true
 }
 
+/// Whether indexed-only discovery is enabled via `CARGO_STORAGE_SPOTLIGHT_ONLY`.
+pub(crate) fn only_enabled() -> bool {
+    match std::env::var(ENV_ONLY).as_deref() {
+        Ok("0") | Ok("false") | Ok("no") | Ok("off") => false,
+        Ok(value) if value.eq_ignore_ascii_case("false") || value.eq_ignore_ascii_case("no") => {
+            false
+        }
+        Ok(value) if value.eq_ignore_ascii_case("off") => false,
+        Ok("") => false,
+        Ok(value) if is_truthy(value) => true,
+        Ok(_) => false,
+        Err(_) => false,
+    }
+}
+
+/// Whether the Spotlight prefetch is disabled via `CARGO_STORAGE_SPOTLIGHT`.
 fn spotlight_disabled() -> bool {
     match std::env::var(ENV_DISABLE).as_deref() {
-        Ok("0") | Ok("false") | Ok("no") | Ok("off") | Ok("FALSE") | Ok("OFF") => true,
-        Ok(value) if value.eq_ignore_ascii_case("false") || value.eq_ignore_ascii_case("no") => {
+        Ok("0") | Ok("false") | Ok("no") | Ok("off") => true,
+        Ok(value)
+            if value.eq_ignore_ascii_case("false")
+                || value.eq_ignore_ascii_case("no")
+                || value.eq_ignore_ascii_case("off") =>
+        {
             true
         }
         _ => false,
     }
 }
 
+/// Whether `path` contains a normal path component equal to `name`.
 fn path_has_component(path: &Path, name: &str) -> bool {
-    path.components()
-        .any(|c| matches!(c, Component::Normal(s) if s == name))
+    path.components().any(|c| matches!(c, Component::Normal(s) if s == name))
+}
+
+fn is_truthy(value: &str) -> bool {
+    matches!(value, "1" | "true" | "yes" | "on" | "TRUE" | "YES" | "ON")
+        || value.eq_ignore_ascii_case("true")
+        || value.eq_ignore_ascii_case("yes")
+        || value.eq_ignore_ascii_case("on")
 }
