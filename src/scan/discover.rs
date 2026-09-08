@@ -11,7 +11,7 @@
 //! `CARGO_STORAGE_SPOTLIGHT_WALK=1` to run both (slower, catches unindexed
 //! manifests). Linked worktrees are still walked after Spotlight.
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, RwLock,
@@ -66,11 +66,6 @@ pub(crate) struct Ctx {
     /// find worktrees of nested repos, not just the scan root's own repo.
     repos: Mutex<Vec<PathBuf>>,
 }
-#[tracing::instrument(skip_all, fields(root = %root.display()))]
-pub fn discover(root: &Path) -> Vec<DiscoveredEntry> {
-    discover_with_options(root, Resolver::new(), Config::load().discovery.worktrees)
-}
-
 /// Find project/output pairs without measuring them. Test seam: worktree
 /// walks stay enabled so hermetic callers see existing behavior.
 ///
@@ -89,12 +84,92 @@ pub(crate) fn discover_with_options(
     resolver: Resolver,
     worktrees: bool,
 ) -> Vec<DiscoveredEntry> {
-    let ctx = walk_ctx(root, resolver);
-    if !worktrees {
-        return finish(ctx);
+    let ctx = setup_ctx(root, resolver);
+    run_collect(root, &ctx);
+    if worktrees {
+        worktree_phase(&ctx, root);
     }
-    // The root query covers `scan <repo>`; per-repo queries cover ancestor
-    // scans (e.g. home), where the root itself is not a repo.
+    finish(ctx)
+}
+/// Discover and measure concurrently for headless runs. Manifests stream
+/// off the walk into rayon measurement while the walk continues; rows
+/// still come from the shared [`finish`], so output matches [`discover`]
+/// exactly and only the schedule changes.
+#[tracing::instrument(skip_all, fields(root = %root.display()))]
+pub(crate) fn discover_measured(root: &Path) -> (Vec<DiscoveredEntry>, Vec<Measurement>) {
+    discover_measured_with(root, Resolver::new(), Config::load().discovery.worktrees)
+}
+
+pub(crate) fn discover_measured_with(
+    root: &Path,
+    resolver: Resolver,
+    worktrees: bool,
+) -> (Vec<DiscoveredEntry>, Vec<Measurement>) {
+    let ctx = setup_ctx(root, resolver);
+    let out = Mutex::new(HashMap::<PathBuf, Measurement>::new());
+    let done = AtomicBool::new(false);
+    rayon::scope(|s| {
+        s.spawn(|_| drain_measure(&ctx, &done, &out));
+        run_collect(root, &ctx);
+        if worktrees {
+            worktree_phase(&ctx, root);
+        }
+        done.store(true, Ordering::Release);
+    });
+    let entries = finish(ctx);
+    let mut measurements: Vec<Measurement> =
+        out.into_inner().unwrap_or_default().into_values().collect();
+    measurements.sort_by(|a, b| a.target_dir.cmp(&b.target_dir));
+    (entries, measurements)
+}
+
+/// Measure manifests as the walk records them. Single task: batches are
+/// disjoint slices of the manifest list, and one row per output dir keeps
+/// shared targets from double-measuring.
+fn drain_measure(ctx: &Arc<Ctx>, done: &AtomicBool, out: &Mutex<HashMap<PathBuf, Measurement>>) {
+    let mut seen = 0usize;
+    loop {
+        let batch: Vec<PathBuf> = ctx
+            .manifests
+            .lock()
+            .map(|m| {
+                let fresh = m[seen..].to_vec();
+                seen = m.len();
+                fresh
+            })
+            .unwrap_or_default();
+        for manifest in &batch {
+            let entries = ctx
+                .resolver
+                .lock()
+                .map(|mut resolver| resolver.resolve(manifest))
+                .unwrap_or_default();
+            for entry in &entries {
+                if !is_target_dir(&entry.target_dir)
+                    || out.lock().is_ok_and(|o| o.contains_key(&entry.target_dir))
+                {
+                    continue;
+                }
+                let measurement = measure_target(&entry.target_dir);
+                let _ = out
+                    .lock()
+                    .map(|mut o| o.insert(entry.target_dir.clone(), measurement));
+            }
+        }
+        if batch.is_empty() {
+            if done.load(Ordering::Acquire) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+}
+
+/// Query `git worktree list` for the scan root plus every repo the walk
+/// saw, then walk the in-scope worktrees the main walk could not reach.
+/// The root query covers `scan <repo>`; per-repo queries cover ancestor
+/// scans (e.g. home), where the root itself is not a repo.
+fn worktree_phase(ctx: &Arc<Ctx>, root: &Path) {
     let mut candidates = worktree_list(root);
     let mut repos: Vec<PathBuf> = ctx
         .repos
@@ -115,9 +190,8 @@ pub(crate) fn discover_with_options(
         covered.push(canonical);
     }
     for extra in select_worktrees(candidates, root, &covered) {
-        run_walk(&extra, &ctx);
+        run_walk(&extra, ctx);
     }
-    finish(ctx)
 }
 
 /// Test seam: `extra_roots` are walked alongside `root` with the same
@@ -151,21 +225,25 @@ pub(crate) fn discover_with_extra(
 }
 
 /// Shared walk setup plus the main walk over `root`.
-fn walk_ctx(root: &Path, mut resolver: Resolver) -> Arc<Ctx> {
+#[cfg(test)]
+fn walk_ctx(root: &Path, resolver: Resolver) -> Arc<Ctx> {
+    let ctx = setup_ctx(root, resolver);
+    run_collect(root, &ctx);
+    ctx
+}
+fn setup_ctx(root: &Path, mut resolver: Resolver) -> Arc<Ctx> {
     let customs: HashSet<PathBuf> = resolver
         .outer_dirs(root)
         .into_iter()
         .filter(|d| d != root)
         .collect();
-    let ctx = Arc::new(Ctx {
+    Arc::new(Ctx {
         resolver: Mutex::new(resolver),
         has_customs: AtomicBool::new(!customs.is_empty()),
         customs: RwLock::new(customs),
         manifests: Mutex::new(Vec::new()),
         repos: Mutex::new(Vec::new()),
-    });
-    run_collect(root, &ctx);
-    ctx
+    })
 }
 
 /// Discover manifests under `root`, preferring Spotlight on macOS.
@@ -359,7 +437,18 @@ fn keep_entry(entry: &DirEntry, ctx: &Ctx) -> bool {
         return false;
     }
     match entry.file_name().to_str() {
-        Some(".git") | Some(".cargo") => false,
+        // Yielded for repo detection; visit records the parent and skips
+        // descent, which subsumes pruning.
+        Some(".git") => true,
+        Some(".cargo") => false,
+        // Manager-owned subtrees: toolchain installs and caches. Wiped by
+        // their owners at any time, so no live project nests inside;
+        // skipping them drops ~1M entries from a home scan.
+        Some(".rustup") | Some(".cache") => false,
+        // Package-manager-owned trees: `npm ci` recreates them from
+        // lockfiles, and Rust outputs never nest inside (napi emits
+        // `.node` files beside `target/`, not under it).
+        Some("node_modules") => false,
         // A bare `target/` without a sibling `Cargo.toml` may hide nested
         // workspaces, so only a project's own `target/` is pruned.
         Some("target") => !is_project_target(entry.path()),
@@ -390,13 +479,36 @@ fn visit_entry(result: Result<DirEntry, ignore::Error>, ctx: &Ctx) -> WalkState 
     let Ok(entry) = result else {
         return WalkState::Continue;
     };
+    // Repos advertise with a `.git` child: a dir for main checkouts, a file
+    // for linked worktrees and submodules. The walker yields it, so the
+    // parent records a repo without stat-ing every dir. Never descended,
+    // exactly like pruning. The customs guard mirrors `keep_entry`: a repo
+    // inside a pruned custom output dir stays invisible.
+    if entry.depth() > 0 && entry.file_name().to_str() == Some(".git") {
+        if let Some(parent) = entry.path().parent()
+            && !under_pruned_customs(parent, ctx)
+        {
+            record_repo_if_present(parent, ctx);
+        }
+        return WalkState::Skip;
+    }
+    // Manifests advertise with a `Cargo.toml` child file. Same stat-free
+    // detection, reaching `record_manifest_dir` with the same dir the old
+    // per-dir probe used. Only symlinked spellings pay a follow-stat,
+    // matching the old `is_file` semantics exactly.
+    if entry.depth() > 0
+        && entry.file_name().to_str() == Some("Cargo.toml")
+        && is_manifest_file(&entry)
+    {
+        if let Some(parent) = entry.path().parent() {
+            record_manifest_dir(parent, ctx);
+        }
+        return WalkState::Continue;
+    }
     // Symlinked dirs are never projects, and the walker never descends into them.
     if entry.path_is_symlink() || !entry.file_type().is_some_and(|kind| kind.is_dir()) {
         return WalkState::Continue;
     }
-    let dir = entry.path();
-    record_repo_if_present(dir, ctx);
-    record_manifest_dir(dir, ctx);
     WalkState::Continue
 }
 
@@ -409,6 +521,23 @@ pub(crate) fn record_repo_if_present(dir: &Path, ctx: &Ctx) {
         && let Ok(mut repos) = ctx.repos.lock()
     {
         repos.push(dir.to_path_buf());
+    }
+}
+
+/// Whether a custom-output-dir prune hides `dir`, mirroring `keep_entry`.
+/// Only consulted for `.git` entries while customs are active; the common
+/// path pays one atomic load.
+fn under_pruned_customs(dir: &Path, ctx: &Ctx) -> bool {
+    ctx.has_customs.load(Ordering::Relaxed) && is_under_customs(ctx, dir) && !is_manifest_dir(dir)
+}
+
+/// Whether `entry` is a manifest file. Plain files read off the dirent;
+/// symlinked spellings follow, like `Path::is_file` did before.
+fn is_manifest_file(entry: &DirEntry) -> bool {
+    match entry.file_type() {
+        Some(kind) if kind.is_file() => true,
+        Some(kind) if kind.is_symlink() => entry.path().is_file(),
+        _ => false,
     }
 }
 
@@ -893,6 +1022,31 @@ mod tests {
             &discover_with_options(&root, Resolver::hermetic(), true),
             &[root.join("trees/wt")],
         );
+        let _ = fs::remove_dir_all(&root);
+    }
+    #[test]
+    fn streamed_measure_matches_sync_rows_and_sizes() {
+        let root = setup_tree("stream-parity");
+        let sync_rows = discover(&root);
+        let (rows, measurements) = discover_measured_with(&root, Resolver::hermetic(), true);
+        assert_eq!(projects_of(&rows), projects_of(&sync_rows));
+        assert_eq!(rows.len(), measurements.len());
+        let mut by_dir: HashMap<PathBuf, Measurement> = measurements
+            .into_iter()
+            .map(|m| (m.target_dir.clone(), m))
+            .collect();
+        for row in &rows {
+            let streamed = by_dir
+                .remove(&row.target_dir)
+                .unwrap_or_else(|| panic!("no streamed size for {}", row.target_dir.display()));
+            let expected = measure_target(&row.target_dir);
+            assert_eq!(
+                (streamed.size, streamed.last_modified),
+                (expected.size, expected.last_modified),
+                "size drift for {}",
+                row.target_dir.display()
+            );
+        }
         let _ = fs::remove_dir_all(&root);
     }
 
