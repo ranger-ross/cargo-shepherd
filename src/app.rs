@@ -89,7 +89,7 @@ impl App {
                             shared: found.shared,
                             size: None,
                             last_modified: None,
-                            is_under_deletion: false,
+                            is_being_deleted: false,
                         });
                     }
                     std::cmp::Ordering::Equal => {
@@ -110,7 +110,7 @@ impl App {
                         shared: found.shared,
                         size: None,
                         last_modified: None,
-                        is_under_deletion: false,
+                        is_being_deleted: false,
                     });
                 }
                 (Some(_), None) => {
@@ -241,7 +241,7 @@ impl App {
                     shared: false,
                     size: Some(m.size),
                     last_modified: m.last_modified,
-                    is_under_deletion: false,
+                    is_being_deleted: false,
                 });
             }
         }
