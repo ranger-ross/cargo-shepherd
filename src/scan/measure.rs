@@ -1,10 +1,12 @@
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
+    sync::{
+        Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, SystemTime},
 };
-
-use ignore::{DirEntry, WalkBuilder};
 
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
@@ -32,79 +34,114 @@ pub fn measure_target(target_dir: &Path) -> Measurement {
 ///
 /// Size matches `du`: allocated-block sizes, each inode counted once. Missing
 /// paths measure empty with no timestamp, unreadable subtrees add nothing.
+/// Symlinks are never followed but count their own blocks, like before.
 #[tracing::instrument(skip_all, fields(path = %path.as_ref().display()))]
 pub(super) fn recursive_scan_target<T: AsRef<Path>>(path: T) -> (u64, Option<SystemTime>) {
     let path = path.as_ref();
     if !path.exists() || path.is_symlink() {
         return (0, None);
     }
-    // Serial walk with an inline fold: no channel, no extra threads. Targets
-    // already measure in parallel, so per-target pools would only multiply
-    // threads and buffer whole file lists in memory.
-    #[cfg(unix)]
-    let mut seen = HashSet::new();
-    let mut total = 0u64;
-    // Floor at the dir's own mtime, so an existing-but-empty dir still
+    let state = ScanState::default();
+    // Seed the floor with the root's own mtime and blocks: the serial walk
+    // counted the root entry too, so an existing-but-empty dir still
     // reports a real timestamp instead of the epoch.
-    let mut newest = std::fs::symlink_metadata(path)
-        .and_then(|md| md.modified())
-        .unwrap_or(SystemTime::UNIX_EPOCH);
-    let walk = WalkBuilder::new(path)
-        .hidden(false)
-        .require_git(false)
-        .standard_filters(false)
-        .build();
-    for result in walk {
-        let Ok(entry) = result else { continue };
-        let Some(rec) = record_entry(&entry) else {
-            continue;
-        };
+    if let Ok(md) = std::fs::symlink_metadata(path) {
+        let mut acc = (0u64, 0u64);
+        state.claim(&md, &mut acc);
+        state.publish(acc);
+    }
+    // One rayon task per directory, sharing the global pool with the
+    // cross-target fan-out. Files stat inline in the task that lists
+    // their dir; only subdirs spawn, so flat `deps/`-style dirs stay
+    // local and deep trees fan out by depth 2-3.
+    rayon::scope(|s| scan_dir(path.to_path_buf(), s, &state));
+    state.finish()
+}
+
+/// Shared accumulators for one target walk. Each directory task batches
+/// its files locally and publishes one add plus one max, so 16 threads
+/// never ping-pong a cache line per file. The mutex only sees files
+/// with extra hard links.
+#[derive(Default)]
+struct ScanState {
+    total: AtomicU64,
+    newest_ns: AtomicU64,
+    #[cfg(unix)]
+    seen: Mutex<HashSet<(u64, u64)>>,
+}
+
+impl ScanState {
+    /// Fold one entry into a task-local `(total, newest)`. Returns
+    /// `false` for a repeat hard link, which counts nothing.
+    fn claim(&self, md: &std::fs::Metadata, acc: &mut (u64, u64)) -> bool {
         // Only inodes that can repeat need dedup: files with extra links.
         // Plain files and dirs skip the set entirely.
         #[cfg(unix)]
-        if rec.nlink > 1 && !seen.insert((rec.dev, rec.ino)) {
+        {
+            let nlink = if md.is_dir() { 1 } else { md.nlink() };
+            if nlink > 1
+                && !self
+                    .seen
+                    .lock()
+                    .is_ok_and(|mut seen| seen.insert((md.dev(), md.ino())))
+            {
+                return false;
+            }
+        }
+        #[cfg(unix)]
+        let size = md.blocks() * 512;
+        #[cfg(not(unix))]
+        let size = md.len();
+        acc.0 += size;
+        acc.1 = acc.1.max(mtime_ns(md));
+        true
+    }
+
+    fn publish(&self, acc: (u64, u64)) {
+        self.total.fetch_add(acc.0, Ordering::Relaxed);
+        self.newest_ns.fetch_max(acc.1, Ordering::Relaxed);
+    }
+
+    fn finish(&self) -> (u64, Option<SystemTime>) {
+        (
+            self.total.load(Ordering::Relaxed),
+            Some(
+                SystemTime::UNIX_EPOCH
+                    + Duration::from_nanos(self.newest_ns.load(Ordering::Relaxed)),
+            ),
+        )
+    }
+}
+
+fn scan_dir<'a>(dir: PathBuf, scope: &rayon::Scope<'a>, state: &'a ScanState) {
+    let Ok(read_dir) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    let mut acc = (0u64, 0u64);
+    for entry in read_dir.flatten() {
+        if entry.file_type().is_err() {
             continue;
         }
-        total += rec.size;
-        newest = newest.max(SystemTime::UNIX_EPOCH + Duration::from_nanos(rec.mtime_ns));
+        // lstat: symlinks record their own inode but are never followed.
+        let Ok(md) = std::fs::symlink_metadata(entry.path()) else {
+            continue;
+        };
+        if !state.claim(&md, &mut acc) {
+            continue;
+        }
+        if md.is_dir() {
+            scope.spawn(move |s| scan_dir(entry.path(), s, state));
+        }
     }
-    (total, Some(newest))
+    state.publish(acc);
 }
 
-struct EntryRec {
-    #[cfg(unix)]
-    dev: u64,
-    #[cfg(unix)]
-    ino: u64,
-    #[cfg(unix)]
-    nlink: u64,
-    size: u64,
-    mtime_ns: u64,
-}
-
-fn record_entry(entry: &DirEntry) -> Option<EntryRec> {
-    // lstat: a symlink records its own inode but is never followed.
-    let md = std::fs::symlink_metadata(entry.path()).ok()?;
-    Some(EntryRec {
-        #[cfg(unix)]
-        dev: md.dev(),
-        #[cfg(unix)]
-        ino: md.ino(),
-        // Dirs are visited exactly once (symlinks are never followed and
-        // dirs cannot hardlink), so they need no dedup. Only files with
-        // extra links enter the set.
-        #[cfg(unix)]
-        nlink: if md.is_dir() { 1 } else { md.nlink() },
-        size: md.blocks() * 512,
-        #[cfg(not(unix))]
-        size: md.len(),
-        mtime_ns: md
-            .modified()
-            .ok()
-            .and_then(|st| st.duration_since(SystemTime::UNIX_EPOCH).ok())
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0),
-    })
+fn mtime_ns(md: &std::fs::Metadata) -> u64 {
+    md.modified()
+        .ok()
+        .and_then(|st| st.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]

@@ -5,7 +5,6 @@ use std::{
 };
 
 use eyre::Result;
-use rayon::prelude::*;
 
 use crate::{
     app::App,
@@ -14,16 +13,15 @@ use crate::{
 };
 
 /// Blocking scan that reuses the TUI state for sorting and totals.
+/// Discovery and measurement overlap on the pool; the build-cache walk
+/// joins them instead of extending the critical path.
 fn collect(root: &Path) -> App {
     let mut app = App::new(root.to_path_buf());
-    app.set_discovered(scan::discover(root));
-    let measurements: Vec<_> = app
-        .entries
-        .par_iter()
-        .map(|e| scan::measure_target(&e.target_dir))
-        .collect();
+    let ((discovered, measurements), build_cache) =
+        rayon::join(|| scan::discover_measured(root), scan::build_cache_entry);
+    app.set_discovered(discovered);
     app.apply_measurements(&measurements);
-    app.finish_scan(scan::build_cache_entry());
+    app.finish_scan(build_cache);
     app
 }
 

@@ -10,7 +10,8 @@ mod measure;
 
 pub use cache::{build_cache_entry, build_cache_path};
 pub use cargo_config::{DiscoveredEntry, OutputKind};
-pub use discover::{ScanEvent, discover, scan_stream};
+pub(crate) use discover::discover_measured;
+pub use discover::{ScanEvent, scan_stream};
 pub use measure::{Measurement, measure_target};
 
 use std::{
