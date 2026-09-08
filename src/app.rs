@@ -7,6 +7,7 @@ use crate::scan::{DiscoveredEntry, Measurement, TargetEntry, build_cache_path};
 
 pub struct App {
     pub root: PathBuf,
+    /// Kept sorted by `target_dir`. Sorting and filtering only affect `visible_indices()`.
     pub entries: Vec<TargetEntry>,
     pub build_cache: Option<TargetEntry>,
     pub build_cache_path: Option<PathBuf>,
@@ -54,22 +55,70 @@ impl App {
         }
     }
 
+    /// Merge the results of a scan into `entries`, keeping them sorted.
+    ///
+    /// Incoming `DiscoveredEntry` items are deduplicated on `target_path`.
+    ///
+    /// Current `TargetEntry` and incoming `DiscoveredEntry` items are joined on `target_path`.
+    /// If a `DiscoveredEntry` has *no* matching `TargetEntry`, it is simply added as new.
+    /// If a `DiscoveredEntry` *does* have an existing `TargetEntry`, metadata e.g. `size` are kept.
+    /// If a `TargetEntry` no longer has a matching `DiscoveredEntry`, it is removed.
     pub fn set_discovered(&mut self, discovered: Vec<impl Into<DiscoveredEntry>>) {
-        let entries: Vec<TargetEntry> = discovered
-            .into_iter()
-            .map(|item| {
-                let found: DiscoveredEntry = item.into();
-                TargetEntry {
-                    project_path: found.project_path,
-                    target_dir: found.target_dir,
-                    kind: found.kind,
-                    shared: found.shared,
-                    size: None,
-                    last_modified: None,
+        // Dedup incoming entries.
+        let mut discovered: Vec<DiscoveredEntry> = discovered.into_iter().map(Into::into).collect();
+        discovered.sort_by(|a, b| a.target_dir.cmp(&b.target_dir));
+        discovered.dedup_by(|a, b| a.target_dir == b.target_dir);
+
+        // Merge incoming entries, remove stale entries, and keep metadata where possible.
+        let mut old_entries = std::mem::take(&mut self.entries).into_iter().peekable();
+        let mut discovered = discovered.into_iter().peekable();
+        let mut entries = Vec::with_capacity(old_entries.len() + discovered.len());
+        loop {
+            match (old_entries.peek(), discovered.peek()) {
+                (Some(old), Some(found)) => match old.target_dir.cmp(&found.target_dir) {
+                    std::cmp::Ordering::Less => {
+                        // The target no longer appears in discovery.
+                        old_entries.next();
+                    }
+                    std::cmp::Ordering::Greater => {
+                        let found = discovered.next().expect("peeked entry exists");
+                        entries.push(TargetEntry {
+                            project_path: found.project_path,
+                            target_dir: found.target_dir,
+                            kind: found.kind,
+                            shared: found.shared,
+                            size: None,
+                            last_modified: None,
+                        });
+                    }
+                    std::cmp::Ordering::Equal => {
+                        let mut entry = old_entries.next().expect("peeked entry exists");
+                        let found = discovered.next().expect("peeked entry exists");
+                        entry.project_path = found.project_path;
+                        entry.kind = found.kind;
+                        entry.shared = found.shared;
+                        entries.push(entry);
+                    }
+                },
+                (None, Some(_)) => {
+                    let found = discovered.next().expect("peeked entry exists");
+                    entries.push(TargetEntry {
+                        project_path: found.project_path,
+                        target_dir: found.target_dir,
+                        kind: found.kind,
+                        shared: found.shared,
+                        size: None,
+                        last_modified: None,
+                    });
                 }
-            })
-            .collect();
-        self.total_size = 0;
+                (Some(_), None) => {
+                    // The remaining targets no longer appear in discovery.
+                    break;
+                }
+                (None, None) => break,
+            }
+        }
+        self.total_size = entries.iter().filter_map(|e| e.size).sum();
         self.entries = entries;
         self.scanning = true;
         self.clamp_selection();
@@ -611,7 +660,7 @@ mod tests {
     fn filter_alternation_narrows_to_matches() {
         let mut app = app_with_entries();
         app.set_filter("big|zzz".to_string());
-        assert_eq!(app.visible_indices(), vec![0]);
+        assert_eq!(app.visible_indices(), vec![1]);
         app.set_filter("proj-".to_string());
         assert_eq!(app.visible_indices().len(), 2);
     }
