@@ -20,7 +20,9 @@ use std::{
     },
 };
 
-use ignore::{DirEntry, IncrementalIgnore, WalkBuilder, WalkState};
+use ignore::{DirEntry, WalkBuilder, WalkState};
+#[cfg(target_os = "macos")]
+use ignore::IncrementalIgnore;
 use rayon::prelude::*;
 
 use crate::util::cpu_count;
@@ -407,6 +409,7 @@ pub(crate) fn record_manifest_dir(dir: &Path, ctx: &Ctx) {
 }
 
 /// Ignore matcher mirroring [`run_walk`] gitignore settings.
+#[cfg(target_os = "macos")]
 pub(crate) fn build_ignore_matcher(root: &Path) -> IncrementalIgnore {
     WalkBuilder::new(root)
         .hidden(false)
@@ -418,6 +421,7 @@ pub(crate) fn build_ignore_matcher(root: &Path) -> IncrementalIgnore {
 }
 
 /// Whether a walk rooted at `root` would reach `manifest_dir`.
+#[cfg(target_os = "macos")]
 pub(crate) fn spotlight_path_ok(
     root: &Path,
     manifest_dir: &Path,
@@ -454,6 +458,7 @@ pub(crate) fn spotlight_path_ok(
     true
 }
 
+#[cfg(target_os = "macos")]
 pub(crate) fn is_symlink_dir(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|md| md.file_type().is_symlink())
 }
