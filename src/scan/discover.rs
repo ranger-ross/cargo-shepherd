@@ -1,7 +1,9 @@
 //! Find Rust projects and measure their output dirs. Discovery walks in
 //! parallel and honors ignore files, except gitignored `target/` dirs,
-//! which still measure. Projects with `build.target-dir` /
-//! `build.build-dir` in `.cargo/config.toml` report those dirs instead of
+//! which still measure, and linked git worktrees, which are walked even
+//! when a parent ignore file prunes them. Projects with
+//! `build.target-dir` / `build.build-dir` in `.cargo/config.toml` report
+//! those dirs instead of `target/`.
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
@@ -46,16 +48,82 @@ struct Ctx {
     /// entirely while no customs exist.
     has_customs: AtomicBool,
     manifests: Mutex<Vec<PathBuf>>,
+    /// Dirs holding `.git` seen by the main walk. Each is queried for
+    /// linked worktrees after the walk, so ancestor scans (e.g. home)
+    /// find worktrees of nested repos, not just the scan root's own repo.
+    repos: Mutex<Vec<PathBuf>>,
 }
-
-/// Find project/output pairs without measuring them.
 #[tracing::instrument(skip_all, fields(root = %root.display()))]
 pub fn discover(root: &Path) -> Vec<DiscoveredEntry> {
     discover_with(root, Resolver::new())
 }
 
-/// Test seam: disk fixtures fully determine the result.
-pub(crate) fn discover_with(root: &Path, mut resolver: Resolver) -> Vec<DiscoveredEntry> {
+/// Find project/output pairs without measuring them.
+///
+/// Linked worktrees under `root` are walked explicitly, so a worktree in
+/// a gitignored dir (e.g. `.ignored/trees/t1`) is still discovered.
+/// Anything git reports outside `root` stays out of scope.
+pub(crate) fn discover_with(root: &Path, resolver: Resolver) -> Vec<DiscoveredEntry> {
+    let ctx = walk_ctx(root, resolver);
+    // The root query covers `scan <repo>`; per-repo queries cover ancestor
+    // scans (e.g. home), where the root itself is not a repo.
+    let mut candidates = worktree_list(root);
+    let mut repos: Vec<PathBuf> = ctx
+        .repos
+        .lock()
+        .map(|mut repos| std::mem::take(&mut *repos))
+        .unwrap_or_default();
+    repos.sort();
+    repos.dedup();
+    candidates.extend(
+        repos
+            .par_iter()
+            .flat_map(|repo| worktree_list(repo))
+            .collect::<Vec<_>>(),
+    );
+    let mut covered = repos;
+    covered.push(root.to_path_buf());
+    if let Ok(canonical) = std::fs::canonicalize(root) {
+        covered.push(canonical);
+    }
+    for extra in select_worktrees(candidates, root, &covered) {
+        run_walk(&extra, &ctx);
+    }
+    finish(ctx)
+}
+
+/// Test seam: `extra_roots` are walked alongside `root` with the same
+/// filters, so fixtures fully determine the result without needing git.
+#[cfg(test)]
+pub(crate) fn discover_with_extra(
+    root: &Path,
+    resolver: Resolver,
+    extra_roots: &[PathBuf],
+) -> Vec<DiscoveredEntry> {
+    let ctx = walk_ctx(root, resolver);
+    // A parent ignore file may prune these paths from the main walk, so
+    // each gets its own walk rooted inside the ignored dir. Walking from
+    // the worktree itself bypasses the parent's ignore rules.
+    let canonical_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let mut extras: Vec<&PathBuf> = extra_roots
+        .iter()
+        .filter(|p| {
+            let mine = *p != root && *p != &canonical_root;
+            mine && (p.starts_with(root) || p.starts_with(&canonical_root))
+        })
+        .collect();
+    extras.sort();
+    extras.dedup();
+    for extra in extras {
+        if extra.is_dir() {
+            run_walk(extra, &ctx);
+        }
+    }
+    finish(ctx)
+}
+
+/// Shared walk setup plus the main walk over `root`.
+fn walk_ctx(root: &Path, mut resolver: Resolver) -> Arc<Ctx> {
     let customs: HashSet<PathBuf> = resolver
         .outer_dirs(root)
         .into_iter()
@@ -66,27 +134,20 @@ pub(crate) fn discover_with(root: &Path, mut resolver: Resolver) -> Vec<Discover
         has_customs: AtomicBool::new(!customs.is_empty()),
         customs: RwLock::new(customs),
         manifests: Mutex::new(Vec::new()),
+        repos: Mutex::new(Vec::new()),
     });
-    WalkBuilder::new(root)
-        // Hidden dirs may hold projects; `.git` and `.cargo` are pruned below.
-        .hidden(false)
-        // Apply gitignores even outside a git checkout.
-        .require_git(false)
-        .threads(cpu_count())
-        .filter_entry({
-            let ctx = Arc::clone(&ctx);
-            move |entry| keep_entry(entry, &ctx)
-        })
-        .build_parallel()
-        .run(|| {
-            let ctx = Arc::clone(&ctx);
-            Box::new(move |result: Result<DirEntry, ignore::Error>| visit_entry(result, &ctx))
-        });
+    run_walk(root, &ctx);
+    ctx
+}
+
+/// Resolve collected manifests into one row per output dir.
+fn finish(ctx: Arc<Ctx>) -> Vec<DiscoveredEntry> {
     let Ctx {
         resolver,
         customs: _,
         has_customs: _,
         manifests,
+        repos: _,
     } = Arc::try_unwrap(ctx).map_err(|_| ()).expect("walk done");
     let manifests = manifests.into_inner().unwrap_or_default();
     let mut resolver = resolver.into_inner().unwrap_or_else(|_| Resolver::new());
@@ -110,8 +171,94 @@ pub(crate) fn discover_with(root: &Path, mut resolver: Resolver) -> Vec<Discover
     // so keep the first row per dir.
     let mut seen = HashSet::new();
     entries.retain(|e| seen.insert(e.target_dir.clone()));
+    // A manifest reachable from both the main walk and a worktree walk
+    // (e.g. once an ignore is lifted) resolves to the same rows, so drop
+    // exact duplicates here rather than in the hot walk path.
+    entries.dedup();
     tracing::info!(count = entries.len(), "discovery complete");
     entries
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Worktree candidates under `root`, minus already-walked dirs.
+fn select_worktrees(candidates: Vec<PathBuf>, root: &Path, covered: &[PathBuf]) -> Vec<PathBuf> {
+    let canonical_root = normalize_path(root);
+    let covered: Vec<PathBuf> = covered.iter().map(|c| normalize_path(c)).collect();
+    let mut extras: Vec<PathBuf> = candidates
+        .into_iter()
+        .map(|p| normalize_path(&p))
+        .filter(|p| {
+            (p.starts_with(&canonical_root) || p.starts_with(root))
+                && !covered.iter().any(|c| p == c)
+                && p.is_dir()
+        })
+        .collect();
+    extras.sort();
+    extras.dedup();
+    extras
+}
+
+/// One parallel walk over `root`, recording manifest dirs in `ctx`.
+fn run_walk(root: &Path, ctx: &Arc<Ctx>) {
+    WalkBuilder::new(root)
+        // Hidden dirs may hold projects; `.git` and `.cargo` are pruned below.
+        .hidden(false)
+        // Apply gitignores even outside a git checkout.
+        .require_git(false)
+        .threads(cpu_count())
+        .filter_entry({
+            let ctx = Arc::clone(ctx);
+            move |entry| keep_entry(entry, &ctx)
+        })
+        .build_parallel()
+        .run(|| {
+            let ctx = Arc::clone(ctx);
+            Box::new(move |result: Result<DirEntry, ignore::Error>| visit_entry(result, &ctx))
+        });
+}
+
+/// `git worktree list --porcelain` paths for one repo dir, unfiltered.
+/// Best effort: not a repo, no git binary, or any failure yields empty,
+/// and discovery falls back to the plain walk.
+fn worktree_list(repo: &Path) -> Vec<PathBuf> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["worktree", "list", "--porcelain", "-z"])
+        .output();
+    let Ok(output) = output else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let mut worktrees = Vec::new();
+    for field in output.stdout.split(|&b| b == 0) {
+        let line = std::str::from_utf8(field).unwrap_or_default();
+        let Some(raw) = line.strip_prefix("worktree ") else {
+            continue;
+        };
+        let path = normalize_path(&PathBuf::from(unquote_worktree_path(raw)));
+        if !worktrees.contains(&path) {
+            worktrees.push(path);
+        }
+    }
+    worktrees
+}
+
+/// Unquote a `--porcelain` path, which git double-quotes when it holds
+/// special bytes. Anything else passes through untouched.
+fn unquote_worktree_path(raw: &str) -> String {
+    if raw.len() >= 2 && raw.starts_with('"') && raw.ends_with('"') {
+        raw[1..raw.len() - 1]
+            .replace("\\\"", "\"")
+            .replace("\\\\", "\\")
+    } else {
+        raw.to_owned()
+    }
 }
 
 /// Discover then measure, streaming progress over `tx`.
@@ -187,6 +334,14 @@ fn visit_entry(result: Result<DirEntry, ignore::Error>, ctx: &Ctx) -> WalkState 
         return WalkState::Continue;
     }
     let dir = entry.path();
+    // Any checkout (main or linked) advertises its repo with `.git`.
+    // Repos seen here are queried for linked worktrees after the walk,
+    // so ancestor scans find worktrees of nested repos too.
+    if std::fs::symlink_metadata(dir.join(".git")).is_ok() {
+        if let Ok(mut repos) = ctx.repos.lock() {
+            repos.push(dir.to_path_buf());
+        }
+    }
     if !is_manifest_dir(dir) {
         return WalkState::Continue;
     }
@@ -258,10 +413,25 @@ mod tests {
         root
     }
 
+    fn canonical_path(path: &Path) -> PathBuf {
+        std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    }
+
     fn projects_of(entries: &[DiscoveredEntry]) -> Vec<PathBuf> {
         let mut projects: Vec<PathBuf> = entries.iter().map(|e| e.project_path.clone()).collect();
         projects.sort();
         projects
+    }
+
+    fn expect_projects(entries: &[DiscoveredEntry], expected: &[PathBuf]) {
+        let mut actual: Vec<PathBuf> = entries
+            .iter()
+            .map(|e| canonical_path(&e.project_path))
+            .collect();
+        actual.sort();
+        let mut want: Vec<PathBuf> = expected.iter().map(|p| canonical_path(p)).collect();
+        want.sort();
+        assert_eq!(actual, want);
     }
 
     #[test]
@@ -459,6 +629,112 @@ mod tests {
                 if m.target_dir == root.join("proj-a/target") && m.size >= 5
         )));
         assert!(matches!(events.last(), Some(ScanEvent::Done { .. })));
+        let _ = fs::remove_dir_all(&root);
+    }
+    #[test]
+    fn extra_root_rescues_project_from_gitignored_dir() {
+        let root = std::env::temp_dir().join("cargo-storage-test-wt-extra");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join(".gitignore"), "trees/\n").unwrap();
+        fs::create_dir_all(root.join("trees/wt/target")).unwrap();
+        fs::write(root.join("trees/wt/Cargo.toml"), "[package]\n").unwrap();
+        fs::write(root.join("trees/wt/target/blob.bin"), "hello").unwrap();
+
+        // Main walk alone never descends into the ignored dir.
+        assert!(discover(&root).is_empty());
+        // An explicit worktree walk starts inside it, bypassing the parent rule.
+        let projects = discover_with_extra(&root, Resolver::hermetic(), &[root.join("trees/wt")]);
+        expect_projects(&projects, &[root.join("trees/wt")]);
+        assert_eq!(projects[0].target_dir, root.join("trees/wt/target"));
+        // Roots outside the scan stay out of scope even when listed.
+        let outside = std::env::temp_dir().join("cargo-storage-test-wt-outside");
+        let projects = discover_with_extra(&root, Resolver::hermetic(), &[outside]);
+        assert!(projects.is_empty());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn git_worktree_in_ignored_dir_is_discovered() {
+        if std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let root = std::env::temp_dir().join("cargo-storage-test-wt-git");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(args)
+                .status()
+                .expect("git runs");
+            assert!(status.success(), "git {args:?} failed");
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "test"]);
+        git(&["commit", "--allow-empty", "-m", "init"]);
+        fs::write(root.join(".gitignore"), "trees/\n").unwrap();
+        git(&["worktree", "add", "--detach", "trees/wt"]);
+        // Ordinary ignored project: still skipped.
+        fs::create_dir_all(root.join("trees/ghost/target")).unwrap();
+        fs::write(root.join("trees/ghost/Cargo.toml"), "[package]\n").unwrap();
+        // Linked worktree project: found despite the parent ignore.
+        fs::create_dir_all(root.join("trees/wt/target")).unwrap();
+        fs::write(root.join("trees/wt/Cargo.toml"), "[package]\n").unwrap();
+        fs::write(root.join("trees/wt/target/blob.bin"), "hello").unwrap();
+
+        let projects = discover(&root);
+        expect_projects(&projects, &[root.join("trees/wt")]);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn ancestor_scan_finds_nested_repo_worktree() {
+        if std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        // Scan root is not a repo; the repo nested inside holds an
+        // ignored worktree. This is the `list` (home dir) shape.
+        let root = std::env::temp_dir().join("cargo-storage-test-wt-ancestor");
+        let _ = fs::remove_dir_all(&root);
+        let repo = root.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .status()
+                .expect("git runs");
+            assert!(status.success(), "git {args:?} failed");
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "test"]);
+        git(&["commit", "--allow-empty", "-m", "init"]);
+        fs::write(repo.join(".gitignore"), "trees/\n").unwrap();
+        git(&["worktree", "add", "--detach", "trees/wt"]);
+        fs::create_dir_all(repo.join("proj/target")).unwrap();
+        fs::write(repo.join("proj/Cargo.toml"), "[package]\n").unwrap();
+        fs::write(repo.join("proj/target/blob.bin"), "hello").unwrap();
+        fs::create_dir_all(repo.join("trees/ghost/target")).unwrap();
+        fs::write(repo.join("trees/ghost/Cargo.toml"), "[package]\n").unwrap();
+        fs::create_dir_all(repo.join("trees/wt/target")).unwrap();
+        fs::write(repo.join("trees/wt/Cargo.toml"), "[package]\n").unwrap();
+        fs::write(repo.join("trees/wt/target/blob.bin"), "hello").unwrap();
+
+        let projects = discover(&root);
+        expect_projects(&projects, &[repo.join("proj"), repo.join("trees/wt")]);
         let _ = fs::remove_dir_all(&root);
     }
 }

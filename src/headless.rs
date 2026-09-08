@@ -34,7 +34,7 @@ fn project_label(entry: &TargetEntry, entries: &[TargetEntry]) -> String {
     let suffix = output_suffix(entry, entries)
         .map(|(label, _)| label)
         .unwrap_or("");
-    format!("{}{}", entry.project_name(), suffix)
+    format!("{}{}", entry.display_name(), suffix)
 }
 
 /// Print the TUI table rows as aligned text.
