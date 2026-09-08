@@ -122,7 +122,14 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                 let spans = project_spans(e, &app.entries, base);
                 let name = Text::from(Line::from(spans));
                 let mut size_text = if e.is_being_deleted {
-                    Text::styled("DELETING...", Style::default().fg(crate::ui::theme::AMBER))
+                    Text::from(
+                        crate::ui::loading::Loading::new(
+                            "Deleting...",
+                            app.loading_start.elapsed(),
+                        )
+                        .palette(&crate::ui::loading::DELETE_PALETTE)
+                        .line(),
+                    )
                 } else {
                     match e.size {
                         Some(_) => Text::styled(format_size_opt(e.size), size_style(e.size)),

@@ -35,6 +35,13 @@ pub const DEFAULT_PALETTE: ShimmerPalette = ShimmerPalette {
     high: rgb(0x58a6ff),
     bold_crest: true,
 };
+/// Same sweep with a red crest for destructive states.
+pub const DELETE_PALETTE: ShimmerPalette = ShimmerPalette {
+    low: rgb(0x5f6673),
+    mid: rgb(0x777d88),
+    high: rgb(0xf46b6b),
+    bold_crest: true,
+};
 
 /// Shimmered `Line` for `text` at `elapsed` since the load started.
 /// `None` selects [`DEFAULT_PALETTE`]. Same-tier runs coalesce into one
@@ -85,15 +92,25 @@ pub fn shimmer_line(
 pub struct Loading<'a> {
     text: &'a str,
     elapsed: Duration,
+    palette: Option<&'a ShimmerPalette>,
 }
 
 impl<'a> Loading<'a> {
     pub fn new(text: &'a str, elapsed: Duration) -> Self {
-        Self { text, elapsed }
+        Self {
+            text,
+            elapsed,
+            palette: None,
+        }
+    }
+
+    pub fn palette(mut self, palette: &'a ShimmerPalette) -> Self {
+        self.palette = Some(palette);
+        self
     }
 
     pub fn line(self) -> Line<'static> {
-        shimmer_line(self.text, self.elapsed, None)
+        shimmer_line(self.text, self.elapsed, self.palette)
     }
 }
 
