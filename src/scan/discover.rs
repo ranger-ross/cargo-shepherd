@@ -20,9 +20,9 @@ use std::{
     },
 };
 
-use ignore::{DirEntry, WalkBuilder, WalkState};
 #[cfg(target_os = "macos")]
 use ignore::IncrementalIgnore;
+use ignore::{DirEntry, WalkBuilder, WalkState};
 use rayon::prelude::*;
 
 use crate::util::cpu_count;
