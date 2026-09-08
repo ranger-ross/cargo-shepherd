@@ -129,6 +129,7 @@ pub(crate) fn discover_measured_with(
 fn drain_measure(ctx: &Arc<Ctx>, done: &AtomicBool, out: &Mutex<HashMap<PathBuf, Measurement>>) {
     let mut seen = 0usize;
     loop {
+        let finished = done.load(Ordering::Acquire);
         let batch: Vec<PathBuf> = ctx
             .manifests
             .lock()
@@ -157,7 +158,7 @@ fn drain_measure(ctx: &Arc<Ctx>, done: &AtomicBool, out: &Mutex<HashMap<PathBuf,
             }
         }
         if batch.is_empty() {
-            if done.load(Ordering::Acquire) {
+            if finished {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(1));
