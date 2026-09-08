@@ -33,7 +33,7 @@ pub fn build_cache_entry_at(path: &Path) -> Option<TargetEntry> {
         shared: false,
         size: Some(size),
         last_modified,
-        is_under_deletion: false,
+        is_being_deleted: false,
     })
 }
 

@@ -330,7 +330,7 @@ mod tests {
             shared: false,
             size,
             last_modified: age.map(|a| SystemTime::now() - a),
-            is_under_deletion: false,
+            is_being_deleted: false,
         }
     }
 
@@ -387,7 +387,7 @@ mod tests {
             shared: true,
             size: None,
             last_modified: None,
-            is_under_deletion: false,
+            is_being_deleted: false,
         };
         let rows = [shared.clone()];
         assert_eq!(project_label(&shared, &rows), "Shared Target Dir");

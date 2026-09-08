@@ -35,7 +35,7 @@ pub struct TargetEntry {
     /// Newest mtime under `target_dir`, or `None` while pending or deleted.
     pub last_modified: Option<SystemTime>,
     /// True while the target directory is queued for deletion or being deleted.
-    pub is_under_deletion: bool,
+    pub is_being_deleted: bool,
 }
 
 impl TargetEntry {
@@ -154,7 +154,7 @@ mod tests {
             shared: false,
             size: None,
             last_modified: None,
-            is_under_deletion: false,
+            is_being_deleted: false,
         }
     }
 
