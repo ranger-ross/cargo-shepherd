@@ -443,6 +443,13 @@ mod tests {
         root
     }
 
+    /// Expected path for a `/unix-absolute` fixture. On Windows `/x` is
+    /// drive-relative, so production joins it onto the config base's
+    /// drive; resolve expectations the same way.
+    fn fixture_dir(base: &Path, abs: &str) -> PathBuf {
+        absolutize(base, Path::new(abs))
+    }
+
     #[test]
     fn parses_quoted_values_and_ignores_other_tables() {
         let (target, build) = parse_build_dirs(
@@ -507,8 +514,15 @@ mod tests {
         .unwrap();
         let mut r = Resolver::new();
         let dirs = r.resolve(&root.join("proj"));
-        assert!(dirs.iter().any(|e| e.target_dir == Path::new("/inner")));
-        assert!(!dirs.iter().any(|e| e.target_dir == Path::new("/outer")));
+        assert!(
+            dirs.iter()
+                .any(|e| e.target_dir == fixture_dir(&root.join("proj"), "/inner"))
+        );
+        assert!(
+            !dirs
+                .iter()
+                .any(|e| e.target_dir == fixture_dir(&root, "/outer"))
+        );
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -528,8 +542,15 @@ mod tests {
         .unwrap();
         let mut r = Resolver::new();
         let dirs = r.resolve(&root.join("proj"));
-        assert!(dirs.iter().any(|e| e.target_dir == Path::new("/bare")));
-        assert!(!dirs.iter().any(|e| e.target_dir == Path::new("/toml")));
+        assert!(
+            dirs.iter()
+                .any(|e| e.target_dir == fixture_dir(&root.join("proj"), "/bare"))
+        );
+        assert!(
+            !dirs
+                .iter()
+                .any(|e| e.target_dir == fixture_dir(&root.join("proj"), "/toml"))
+        );
         assert_eq!(dirs.len(), 2, "hash template adds no row: {dirs:?}");
         let _ = fs::remove_dir_all(&root);
     }
@@ -564,7 +585,10 @@ mod tests {
         let mut r = Resolver::new();
         for proj in ["a", "b", "c"] {
             let dirs = r.resolve(&root.join(proj));
-            assert!(dirs.iter().any(|e| e.target_dir == Path::new("/shared")));
+            assert!(
+                dirs.iter()
+                    .any(|e| e.target_dir == fixture_dir(&root, "/shared"))
+            );
         }
         assert_eq!(r.cached_files(), 1, "one distinct .cargo dir parsed once");
         let _ = fs::remove_dir_all(&root);
@@ -589,7 +613,7 @@ mod tests {
         assert!(
             !dirs
                 .iter()
-                .any(|e| e.target_dir == Path::new("/custom-fast-xyz"))
+                .any(|e| e.target_dir == fixture_dir(&root.join("proj"), "/custom-fast-xyz"))
         );
         assert_eq!(r.cached_files(), 0, "default target avoids config I/O");
         let _ = fs::remove_dir_all(&root);
@@ -656,7 +680,7 @@ mod tests {
         for want in ["/shared-target", "/shared-build"] {
             let entry = dirs
                 .iter()
-                .find(|e| e.target_dir == Path::new(want))
+                .find(|e| e.target_dir == fixture_dir(&root, want))
                 .expect("home dir resolves");
             assert!(entry.shared, "{want} stays shared");
         }
@@ -689,10 +713,13 @@ mod tests {
         .unwrap();
         let mut r = home_resolver(Some("/outer"), None);
         let dirs = r.resolve(&root.join("proj"));
-        assert!(dirs.iter().any(|e| e.target_dir == Path::new("/inner")));
+        assert!(
+            dirs.iter()
+                .any(|e| e.target_dir == fixture_dir(&root.join("proj"), "/inner"))
+        );
         let inner = dirs
             .iter()
-            .find(|e| e.target_dir == Path::new("/inner"))
+            .find(|e| e.target_dir == fixture_dir(&root.join("proj"), "/inner"))
             .expect("project target resolves");
         assert!(!inner.shared);
         assert!(!dirs.iter().any(|e| e.target_dir == Path::new("/outer")));
