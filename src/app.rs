@@ -326,7 +326,7 @@ impl App {
             .select(Some(i.saturating_sub(self.page_len.max(1))));
     }
 
-    /// Begin asychronous deletion of the selected entry's `target/` dir.
+    /// Begin asynchronous deletion of the selected entry's `target/` dir.
     ///
     /// Move selection to the next row, if any.
     pub fn begin_delete(&mut self) -> Option<PathBuf> {
