@@ -48,6 +48,18 @@ impl Resolver {
         }
     }
 
+    /// Test seam: `$CARGO_HOME` layer with only `build.build-dir` set.
+    #[cfg(test)]
+    pub(crate) fn with_home_build_dir(build_dir: impl Into<String>) -> Self {
+        let mut r = Self::hermetic();
+        r.home = Some(ConfigFile {
+            base: PathBuf::from("/home/user/.cargo"),
+            target_dir: None,
+            build_dir: Some(build_dir.into()),
+        });
+        r
+    }
+
     /// Candidate output dirs for a manifest dir, most specific last.
     ///
     /// Always includes the default `<manifest>/target` when it differs, so

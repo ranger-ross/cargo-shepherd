@@ -5,9 +5,10 @@
 //! `build.target-dir` / `build.build-dir` in `.cargo/config.toml` report
 //! those dirs instead of `target/`.
 //!
-//! On macOS, discovery can use Spotlight (`mdquery-rs`) to find `Cargo.toml`
-//! files quickly, then filter them to match walk semantics. Set
-//! `CARGO_STORAGE_SPOTLIGHT=0` to force the filesystem walk.
+//! On macOS, discovery may prefetch manifests from Spotlight (`mdquery-rs`)
+//! before the authoritative filesystem walk. Set `CARGO_STORAGE_SPOTLIGHT=0`
+//! to skip the prefetch. Set `CARGO_STORAGE_SPOTLIGHT_ONLY=1` to use indexed
+//! results without walking (faster, but incomplete when the index lags).
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
@@ -25,7 +26,7 @@ use crate::util::cpu_count;
 
 use super::{
     TargetEntry,
-    cargo_config::{DiscoveredEntry, OutputKind, Resolver},
+    cargo_config::{DiscoveredEntry, Resolver},
     measure::{Measurement, measure_target},
 };
 
@@ -148,11 +149,14 @@ fn walk_ctx(root: &Path, mut resolver: Resolver) -> Arc<Ctx> {
     ctx
 }
 
-/// Discover manifests under `root`, preferring Spotlight on macOS.
+/// Discover manifests under `root`, optionally prefetching from Spotlight.
 fn run_collect(root: &Path, ctx: &Arc<Ctx>) {
     #[cfg(target_os = "macos")]
-    if spotlight::collect(root, ctx) {
-        return;
+    {
+        let indexed = spotlight::collect(root, ctx);
+        if indexed && spotlight::only_enabled() {
+            return;
+        }
     }
     run_walk(root, ctx);
 }
@@ -166,29 +170,16 @@ fn finish(ctx: Arc<Ctx>) -> Vec<DiscoveredEntry> {
         manifests,
         repos: _,
     } = Arc::try_unwrap(ctx).map_err(|_| ()).expect("walk done");
-    let manifests = manifests.into_inner().unwrap_or_default();
-    let local_targets: HashSet<PathBuf> = manifests
-        .iter()
-        .filter(|m| is_target_dir(&m.join("target")))
-        .cloned()
-        .collect();
+    let mut manifests = manifests.into_inner().unwrap_or_default();
+    manifests.sort();
+    manifests.dedup();
     let mut resolver = resolver.into_inner().unwrap_or_else(|_| Resolver::new());
     let mut entries = Vec::new();
     for manifest in &manifests {
         for entry in resolver.resolve(manifest) {
-            if !is_target_dir(&entry.target_dir) {
-                continue;
+            if is_target_dir(&entry.target_dir) {
+                entries.push(entry);
             }
-            // Global `$CARGO_HOME` `build-dir` duplicates dedup unpredictably
-            // when discovery order differs (walk vs Spotlight). A local
-            // `target/` is enough for these projects.
-            if entry.kind == OutputKind::Build
-                && entry.shared
-                && local_targets.contains(&entry.project_path)
-            {
-                continue;
-            }
-            entries.push(entry);
         }
     }
     entries.sort_by(|a, b| {
@@ -560,6 +551,39 @@ mod tests {
         assert_eq!(projects.len(), 1);
         assert_eq!(projects[0].project_path, root.join("proj"));
         assert_eq!(projects[0].target_dir, root.join("shared-out"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+
+    #[test]
+    fn local_target_and_shared_build_dir_both_listed() {
+        let root = std::env::temp_dir().join("cargo-storage-test-local-shared-build");
+        let _ = fs::remove_dir_all(&root);
+        let shared_build = root.join("shared-build");
+        fs::create_dir_all(root.join("proj/target")).unwrap();
+        fs::write(root.join("proj/Cargo.toml"), "[package]\n").unwrap();
+        fs::write(root.join("proj/target/blob.bin"), "hello").unwrap();
+        fs::create_dir_all(&shared_build).unwrap();
+        fs::write(shared_build.join("blob.bin"), "world").unwrap();
+
+        let projects = discover_with(
+            &root,
+            Resolver::with_home_build_dir(shared_build.to_string_lossy()),
+        );
+        assert_eq!(projects.len(), 2, "local target and shared build-dir: {projects:?}");
+        let build = projects
+            .iter()
+            .find(|e| e.kind == super::super::OutputKind::Build)
+            .expect("shared build-dir row");
+        assert_eq!(build.target_dir, shared_build);
+        assert!(build.shared);
+        let target = projects
+            .iter()
+            .find(|e| e.kind == super::super::OutputKind::Target)
+            .expect("local target row");
+        assert_eq!(target.target_dir, root.join("proj/target"));
+        assert!(!target.shared);
+        assert!(projects.iter().all(|e| e.project_path == root.join("proj")));
         let _ = fs::remove_dir_all(&root);
     }
 
