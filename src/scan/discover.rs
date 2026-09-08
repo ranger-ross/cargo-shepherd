@@ -29,7 +29,7 @@ use crate::util::cpu_count;
 
 use super::{
     TargetEntry,
-    cargo_config::{DiscoveredEntry, Resolver},
+    cargo_config::{DiscoveredEntry, OutputKind, Resolver},
     measure::{Measurement, measure_target},
 };
 
@@ -173,13 +173,29 @@ fn finish(ctx: Arc<Ctx>) -> Vec<DiscoveredEntry> {
     let mut manifests = manifests.into_inner().unwrap_or_default();
     manifests.sort();
     manifests.dedup();
+    let local_targets: HashSet<PathBuf> = manifests
+        .iter()
+        .filter(|m| is_target_dir(&m.join("target")))
+        .cloned()
+        .collect();
     let mut resolver = resolver.into_inner().unwrap_or_else(|_| Resolver::new());
     let mut entries = Vec::new();
     for manifest in &manifests {
         for entry in resolver.resolve(manifest) {
-            if is_target_dir(&entry.target_dir) {
-                entries.push(entry);
+            if !is_target_dir(&entry.target_dir) {
+                continue;
             }
+            // Global `$CARGO_HOME` `build-dir` is inherited by every
+            // manifest, but discovery order (walk vs Spotlight) decides who
+            // wins the one row per output dir. Projects with a local
+            // `target/` should not also claim the shared build dir.
+            if entry.kind == OutputKind::Build
+                && entry.shared
+                && local_targets.contains(&entry.project_path)
+            {
+                continue;
+            }
+            entries.push(entry);
         }
     }
     entries.sort_by(|a, b| {
@@ -558,13 +574,15 @@ mod tests {
     }
 
     #[test]
-    fn local_target_and_shared_build_dir_both_listed() {
+    fn local_target_does_not_claim_shared_build_dir() {
         let root = std::env::temp_dir().join("cargo-storage-test-local-shared-build");
         let _ = fs::remove_dir_all(&root);
         let shared_build = root.join("shared-build");
-        fs::create_dir_all(root.join("proj/target")).unwrap();
-        fs::write(root.join("proj/Cargo.toml"), "[package]\n").unwrap();
-        fs::write(root.join("proj/target/blob.bin"), "hello").unwrap();
+        fs::create_dir_all(root.join("with-target/target")).unwrap();
+        fs::write(root.join("with-target/Cargo.toml"), "[package]\n").unwrap();
+        fs::write(root.join("with-target/target/blob.bin"), "hello").unwrap();
+        fs::create_dir_all(root.join("no-target")).unwrap();
+        fs::write(root.join("no-target/Cargo.toml"), "[package]\n").unwrap();
         fs::create_dir_all(&shared_build).unwrap();
         fs::write(shared_build.join("blob.bin"), "world").unwrap();
 
@@ -575,21 +593,21 @@ mod tests {
         assert_eq!(
             projects.len(),
             2,
-            "local target and shared build-dir: {projects:?}"
+            "one local target + one shared build: {projects:?}"
         );
+        let with_target = projects
+            .iter()
+            .find(|e| e.project_path == root.join("with-target"))
+            .expect("with-target row");
+        assert_eq!(with_target.kind, super::super::OutputKind::Target);
+        assert_eq!(with_target.target_dir, root.join("with-target/target"));
         let build = projects
             .iter()
             .find(|e| e.kind == super::super::OutputKind::Build)
             .expect("shared build-dir row");
         assert_eq!(build.target_dir, shared_build);
+        assert_eq!(build.project_path, root.join("no-target"));
         assert!(build.shared);
-        let target = projects
-            .iter()
-            .find(|e| e.kind == super::super::OutputKind::Target)
-            .expect("local target row");
-        assert_eq!(target.target_dir, root.join("proj/target"));
-        assert!(!target.shared);
-        assert!(projects.iter().all(|e| e.project_path == root.join("proj")));
         let _ = fs::remove_dir_all(&root);
     }
 
