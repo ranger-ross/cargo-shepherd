@@ -25,6 +25,7 @@ use ignore::IncrementalIgnore;
 use ignore::{DirEntry, WalkBuilder, WalkState};
 use rayon::prelude::*;
 
+use crate::config::Config;
 use crate::util::cpu_count;
 
 use super::{
@@ -67,16 +68,31 @@ pub(crate) struct Ctx {
 }
 #[tracing::instrument(skip_all, fields(root = %root.display()))]
 pub fn discover(root: &Path) -> Vec<DiscoveredEntry> {
-    discover_with(root, Resolver::new())
+    discover_with_options(root, Resolver::new(), Config::load().discovery.worktrees)
 }
 
-/// Find project/output pairs without measuring them.
+/// Find project/output pairs without measuring them. Test seam: worktree
+/// walks stay enabled so hermetic callers see existing behavior.
 ///
 /// Linked worktrees under `root` are walked explicitly, so a worktree in
 /// a gitignored dir (e.g. `.ignored/trees/t1`) is still discovered.
 /// Anything git reports outside `root` stays out of scope.
+#[cfg(test)]
 pub(crate) fn discover_with(root: &Path, resolver: Resolver) -> Vec<DiscoveredEntry> {
+    discover_with_options(root, resolver, true)
+}
+
+/// `worktrees = false` skips the `git worktree list` queries entirely.
+/// The plain walk still finds every manifest it can reach.
+pub(crate) fn discover_with_options(
+    root: &Path,
+    resolver: Resolver,
+    worktrees: bool,
+) -> Vec<DiscoveredEntry> {
     let ctx = walk_ctx(root, resolver);
+    if !worktrees {
+        return finish(ctx);
+    }
     // The root query covers `scan <repo>`; per-repo queries cover ancestor
     // scans (e.g. home), where the root itself is not a repo.
     let mut candidates = worktree_list(root);
@@ -300,14 +316,20 @@ fn unquote_worktree_path(raw: &str) -> String {
     }
 }
 
-/// Discover then measure, streaming progress over `tx`.
+/// Discover then measure, streaming progress over `tx`. Honors
+/// `[discovery] worktrees` from `$CARGO_HOME/cargo-storage.toml`.
 pub fn scan_stream(root: &Path, tx: mpsc::Sender<ScanEvent>) {
-    scan_stream_with(root, tx, Resolver::new());
+    let projects = discover_with_options(root, Resolver::new(), Config::load().discovery.worktrees);
+    stream_projects(projects, tx);
 }
 
 /// Test seam: disk fixtures fully determine the result.
+#[cfg(test)]
 pub(crate) fn scan_stream_with(root: &Path, tx: mpsc::Sender<ScanEvent>, resolver: Resolver) {
-    let projects = discover_with(root, resolver);
+    stream_projects(discover_with(root, resolver), tx);
+}
+
+fn stream_projects(projects: Vec<DiscoveredEntry>, tx: mpsc::Sender<ScanEvent>) {
     if tx.send(ScanEvent::Discovered(projects.clone())).is_err() {
         return;
     }
@@ -833,6 +855,44 @@ mod tests {
 
         let projects = discover(&root);
         expect_projects(&projects, &[root.join("trees/wt")]);
+        let _ = fs::remove_dir_all(&root);
+    }
+    #[test]
+    fn disabled_worktree_discovery_skips_ignored_worktree() {
+        if std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let root = std::env::temp_dir().join("cargo-storage-test-wt-disabled");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(args)
+                .status()
+                .expect("git runs");
+            assert!(status.success(), "git {args:?} failed");
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "test"]);
+        git(&["commit", "--allow-empty", "-m", "init"]);
+        fs::write(root.join(".gitignore"), "trees/\n").unwrap();
+        git(&["worktree", "add", "--detach", "trees/wt"]);
+        fs::create_dir_all(root.join("trees/wt/target")).unwrap();
+        fs::write(root.join("trees/wt/Cargo.toml"), "[package]\n").unwrap();
+        fs::write(root.join("trees/wt/target/blob.bin"), "hello").unwrap();
+
+        assert!(discover_with_options(&root, Resolver::hermetic(), false).is_empty());
+        expect_projects(
+            &discover_with_options(&root, Resolver::hermetic(), true),
+            &[root.join("trees/wt")],
+        );
         let _ = fs::remove_dir_all(&root);
     }
 

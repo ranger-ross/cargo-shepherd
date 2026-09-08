@@ -24,7 +24,9 @@ ignore = "0.4.33"
 rayon = "1.12.0"
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
+figment = { version = "0.10", features = ["toml", "env"] }
 homedir = "0.3.6"
+serde = { version = "1", features = ["derive"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 mdquery-rs = "0.2.1"

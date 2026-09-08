@@ -421,16 +421,7 @@ fn normalize(path: &Path) -> PathBuf {
 }
 
 fn cargo_home() -> PathBuf {
-    if let Ok(home) = std::env::var("CARGO_HOME")
-        && !home.trim().is_empty()
-    {
-        return PathBuf::from(home);
-    }
-    std::env::var("HOME")
-        .ok()
-        .filter(|home| !home.trim().is_empty())
-        .map(|home| PathBuf::from(home).join(".cargo"))
-        .unwrap_or_else(|| PathBuf::from(".cargo"))
+    crate::config::cargo_home()
 }
 
 fn env_dir(key: &str) -> Option<PathBuf> {

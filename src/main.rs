@@ -25,6 +25,7 @@ use crate::util::cpu_count;
 
 mod app;
 mod args;
+mod config;
 mod headless;
 mod poll;
 mod scan;
