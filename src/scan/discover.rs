@@ -493,23 +493,14 @@ fn visit_entry(result: Result<DirEntry, ignore::Error>, ctx: &Ctx) -> WalkState 
         }
         return WalkState::Skip;
     }
-    // Manifests advertise with a `Cargo.toml` child file. Same stat-free
-    // detection, reaching `record_manifest_dir` with the same dir the old
-    // per-dir probe used. Only symlinked spellings pay a follow-stat,
-    // matching the old `is_file` semantics exactly.
-    if entry.depth() > 0
-        && entry.file_name().to_str() == Some("Cargo.toml")
-        && is_manifest_file(&entry)
-    {
-        if let Some(parent) = entry.path().parent() {
-            record_manifest_dir(parent, ctx);
-        }
-        return WalkState::Continue;
-    }
     // Symlinked dirs are never projects, and the walker never descends into them.
     if entry.path_is_symlink() || !entry.file_type().is_some_and(|kind| kind.is_dir()) {
         return WalkState::Continue;
     }
+    // Probe the dir itself so a `Cargo.toml` hidden by ignore rules (e.g.
+    // `*.toml`) still discovers its project. `record_manifest_dir`
+    // rechecks for the manifest file.
+    record_manifest_dir(entry.path(), ctx);
     WalkState::Continue
 }
 
@@ -530,16 +521,6 @@ pub(crate) fn record_repo_if_present(dir: &Path, ctx: &Ctx) {
 /// path pays one atomic load.
 fn under_pruned_customs(dir: &Path, ctx: &Ctx) -> bool {
     ctx.has_customs.load(Ordering::Relaxed) && is_under_customs(ctx, dir) && !is_manifest_dir(dir)
-}
-
-/// Whether `entry` is a manifest file. Plain files read off the dirent;
-/// symlinked spellings follow, like `Path::is_file` did before.
-fn is_manifest_file(entry: &DirEntry) -> bool {
-    match entry.file_type() {
-        Some(kind) if kind.is_file() => true,
-        Some(kind) if kind.is_symlink() => entry.path().is_file(),
-        _ => false,
-    }
 }
 
 /// Record one manifest dir and register any custom output dirs for pruning.
