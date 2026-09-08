@@ -55,7 +55,7 @@ impl App {
     }
 
     pub fn set_discovered(&mut self, discovered: Vec<impl Into<DiscoveredEntry>>) {
-        let mut entries: Vec<TargetEntry> = discovered
+        let entries: Vec<TargetEntry> = discovered
             .into_iter()
             .map(|item| {
                 let found: DiscoveredEntry = item.into();
@@ -69,7 +69,6 @@ impl App {
                 }
             })
             .collect();
-        self.sort_entries(&mut entries);
         self.total_size = 0;
         self.entries = entries;
         self.scanning = true;
@@ -84,9 +83,6 @@ impl App {
     pub fn finish_scan(&mut self, build_cache: Option<TargetEntry>) {
         self.build_cache = build_cache;
         self.scanning = false;
-        let mut entries = std::mem::take(&mut self.entries);
-        self.sort_entries(&mut entries);
-        self.entries = entries;
         self.clamp_selection();
     }
 
@@ -103,9 +99,6 @@ impl App {
 
     pub fn cycle_sort(&mut self) {
         self.sort = self.sort.next();
-        let mut entries = std::mem::take(&mut self.entries);
-        self.sort_entries(&mut entries);
-        self.entries = entries;
     }
 
     /// Replace the filter text; an invalid pattern keeps the last good one.
@@ -135,7 +128,7 @@ impl App {
     }
 
     pub fn visible_indices(&self) -> Vec<usize> {
-        match &self.filter_regex {
+        let mut visible: Vec<usize> = match &self.filter_regex {
             None => (0..self.entries.len()).collect(),
             Some(re) => self
                 .entries
@@ -149,7 +142,16 @@ impl App {
                 })
                 .map(|(i, _)| i)
                 .collect(),
-        }
+        };
+        visible.sort_by(|&a, &b| self.compare_entries(&self.entries[a], &self.entries[b]));
+        visible
+    }
+
+    /// The row at a position in the sorted, filtered table.
+    pub fn visible_entry(&self, position: usize) -> Option<&TargetEntry> {
+        self.visible_indices()
+            .get(position)
+            .and_then(|&index| self.entries.get(index))
     }
 
     #[tracing::instrument(skip_all)]
@@ -192,9 +194,6 @@ impl App {
             }
         }
         self.total_size = self.entries.iter().filter_map(|e| e.size).sum();
-        let mut entries = std::mem::take(&mut self.entries);
-        self.sort_entries(&mut entries);
-        self.entries = entries;
         if !self.navigated {
             // Sizes churn the order while the walk runs. Stay glued to the
             // top until the user takes over.
@@ -308,9 +307,6 @@ impl App {
             entry.last_modified = None;
         }
         self.total_size = self.entries.iter().filter_map(|e| e.size).sum();
-        let mut entries = std::mem::take(&mut self.entries);
-        self.sort_entries(&mut entries);
-        self.entries = entries;
         if neighbor.is_none() {
             return;
         }
@@ -334,11 +330,11 @@ impl App {
         }
     }
 
-    fn sort_entries(&self, entries: &mut [TargetEntry]) {
+    fn compare_entries(&self, a: &TargetEntry, b: &TargetEntry) -> std::cmp::Ordering {
         match self.sort {
             // Pending rows float above measured ones: big dirs take
             // longest to measure, so they stay visible while loading.
-            SortKey::Size => entries.sort_by(|a, b| match (a.size, b.size) {
+            SortKey::Size => match (a.size, b.size) {
                 (Some(x), Some(y)) => y.cmp(&x),
                 (Some(_), None) => std::cmp::Ordering::Greater,
                 (None, Some(_)) => std::cmp::Ordering::Less,
@@ -346,9 +342,9 @@ impl App {
                     .project_path
                     .cmp(&b.project_path)
                     .then(a.target_dir.cmp(&b.target_dir)),
-            }),
+            },
             SortKey::Modified => {
-                entries.sort_by(|a, b| match (&a.last_modified, &b.last_modified) {
+                match (&a.last_modified, &b.last_modified) {
                     // Pending and deleted dirs have no timestamp. They sink.
                     (None, None) => a
                         .project_path
@@ -360,13 +356,12 @@ impl App {
                         .cmp(x)
                         .then(a.project_path.cmp(&b.project_path))
                         .then(a.target_dir.cmp(&b.target_dir)),
-                })
+                }
             }
-            SortKey::Name => entries.sort_by(|a, b| {
-                a.project_path
-                    .cmp(&b.project_path)
-                    .then(a.target_dir.cmp(&b.target_dir))
-            }),
+            SortKey::Name => a
+                .project_path
+                .cmp(&b.project_path)
+                .then(a.target_dir.cmp(&b.target_dir)),
         }
     }
 }
@@ -427,13 +422,16 @@ mod tests {
             size: 200,
             last_modified: Some(SystemTime::UNIX_EPOCH),
         }]);
-        assert_eq!(app.entries[0].project_path, PathBuf::from("proj-small"));
+        assert_eq!(
+            app.visible_entry(0).unwrap().project_path,
+            PathBuf::from("proj-small")
+        );
         assert_eq!(app.total_size, 300);
         let selected = app
             .table_state
             .selected()
-            .and_then(|i| app.entries.get(i))
-            .expect("selection kept");
+            .and_then(|i| app.visible_entry(i))
+            .unwrap();
         assert_eq!(selected.project_path, PathBuf::from("proj-small"));
         assert_eq!(selected.size, Some(200));
     }
@@ -464,13 +462,16 @@ mod tests {
         }]);
         assert!(app.scanning);
         assert_eq!(app.total_size, 50);
-        assert_eq!(app.entries[0].size, None);
-        assert_eq!(app.entries[1].project_path, PathBuf::from("proj-a"));
-        assert_eq!(app.entries[1].size, Some(50));
+        assert_eq!(app.visible_entry(0).unwrap().size, None);
+        assert_eq!(
+            app.visible_entry(1).unwrap().project_path,
+            PathBuf::from("proj-a")
+        );
+        assert_eq!(app.visible_entry(1).unwrap().size, Some(50));
         // Finishing keeps still-pending rows pending for the poller.
         app.finish_scan(None);
         assert!(!app.scanning);
-        assert_eq!(app.entries[0].size, None);
+        assert_eq!(app.visible_entry(0).unwrap().size, None);
     }
     #[test]
     fn fresh_discovery_jumps_to_top() {
@@ -493,7 +494,10 @@ mod tests {
             size: 200,
             last_modified: Some(SystemTime::UNIX_EPOCH),
         }]);
-        assert_eq!(app.entries[0].project_path, PathBuf::from("proj-a"));
+        assert_eq!(
+            app.visible_entry(0).unwrap().project_path,
+            PathBuf::from("proj-a")
+        );
         assert_eq!(app.table_state.selected(), Some(0));
     }
     #[test]
@@ -505,17 +509,29 @@ mod tests {
             size: 10,
             last_modified: Some(SystemTime::UNIX_EPOCH),
         }]);
-        assert_eq!(app.entries[0].project_path, PathBuf::from("proj-a"));
-        assert_eq!(app.entries[0].size, None);
-        assert_eq!(app.entries[1].project_path, PathBuf::from("proj-b"));
+        assert_eq!(
+            app.visible_entry(0).unwrap().project_path,
+            PathBuf::from("proj-a")
+        );
+        assert_eq!(app.visible_entry(0).unwrap().size, None);
+        assert_eq!(
+            app.visible_entry(1).unwrap().project_path,
+            PathBuf::from("proj-b")
+        );
         // Once everything measures, pure size-desc takes over.
         app.apply_measurements(&[Measurement {
             target_dir: PathBuf::from("proj-a/target"),
             size: 200,
             last_modified: Some(SystemTime::UNIX_EPOCH),
         }]);
-        assert_eq!(app.entries[0].project_path, PathBuf::from("proj-a"));
-        assert_eq!(app.entries[1].project_path, PathBuf::from("proj-b"));
+        assert_eq!(
+            app.visible_entry(0).unwrap().project_path,
+            PathBuf::from("proj-a")
+        );
+        assert_eq!(
+            app.visible_entry(1).unwrap().project_path,
+            PathBuf::from("proj-b")
+        );
     }
 
     #[test]
@@ -531,7 +547,10 @@ mod tests {
             size: 200,
             last_modified: Some(SystemTime::UNIX_EPOCH),
         }]);
-        assert_eq!(app.entries[0].project_path, PathBuf::from("proj-b"));
+        assert_eq!(
+            app.visible_entry(0).unwrap().project_path,
+            PathBuf::from("proj-b")
+        );
         assert_eq!(app.table_state.selected(), Some(0));
     }
 
@@ -602,7 +621,7 @@ mod tests {
         let mut app = App::new(PathBuf::from("."));
         app.set_discovered(vec![PathBuf::from("ws/member-a"), PathBuf::from("other")]);
         app.set_filter("member".to_string());
-        assert_eq!(app.visible_indices(), vec![1]);
+        assert_eq!(app.visible_indices(), vec![0]);
     }
 
     #[test]
