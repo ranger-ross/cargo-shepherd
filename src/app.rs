@@ -327,6 +327,8 @@ impl App {
     }
 
     /// Begin asychronous deletion of the selected entry's `target/` dir.
+    ///
+    /// Move selection to the next row, if any.
     pub fn begin_delete(&mut self) -> Option<PathBuf> {
         self.navigated = true;
         let visible = self.visible_indices();
@@ -348,13 +350,16 @@ impl App {
         }
         // Mark the entry as being deleted.
         entry.is_being_deleted = true;
+
+        // Move selection down.
+        self.table_state.select_next();
+
         Some(target_dir)
     }
 
     /// Finish asynchronous deletion, processing success or failure.
     ///
     /// A missing dir counts as deleted. Failures surface in `delete_error`.
-    /// Selection stays put.
     pub fn finish_delete(&mut self, target_dir: PathBuf, result: std::io::Result<()>) {
         match result {
             Ok(()) => self.delete_error = None,
@@ -368,11 +373,39 @@ impl App {
             }
         }
 
-        if let Some(entry) = self.entries.iter_mut().find(|e| e.target_dir == target_dir) {
-            entry.size = Some(0);
-            entry.last_modified = None;
+        if let Some(index) = self
+            .entries
+            .iter()
+            .position(|entry| entry.target_dir == target_dir)
+        {
+            self.mark_entry_deleted(index);
         }
-        self.total_size = self.entries.iter().filter_map(|e| e.size).sum();
+    }
+
+    // Mark an entry as deleted.
+    //
+    // Update `total_size` accordingly.
+    // Keep selection in place by updating its index when necessary.
+    fn mark_entry_deleted(&mut self, index: usize) {
+        // Save visible indices here, because altering the entry might cause changes.
+        let visible_indices = self.visible_indices();
+
+        let entry = &mut self.entries[index];
+
+        // Update the total size.
+        let size = entry.size.unwrap_or(0);
+        self.total_size = self.total_size.saturating_sub(size);
+
+        // Mark the entry as deleted.
+        entry.size = Some(0);
+        entry.last_modified = None;
+
+        // Move the selection up if the entry appeared above it.
+        if let Some(selection_index) = self.table_state.selected()
+            && visible_indices[..selection_index].contains(&index)
+        {
+            self.table_state.select_previous();
+        }
     }
 
     /// Select the first row without counting as user navigation, so the
