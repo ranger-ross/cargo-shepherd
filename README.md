@@ -21,6 +21,10 @@ Cargo storage management CLI/TUI
 ## Installation
 
 ```shell
+# Prebuilt binary (linux x86_64, macOS, Windows x86_64)
+cargo binstall cargo-storage
+
+# From source
 cargo install cargo-storage
 ```
 

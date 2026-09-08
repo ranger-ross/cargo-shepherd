@@ -9,6 +9,9 @@ categories = ["command-line-utilities", "development-tools::cargo-plugins"]
 readme = "README.md"
 license = "MIT"
 exclude = [".github/", "renovate.json", ".gitignore", "assets"]
+[package.metadata.binstall]
+# Archives ship the binary at the archive root (no leading dir).
+bin-dir = "{ bin }{ binary-ext }"
 
 [dependencies]
 ratatui = "0.30"
