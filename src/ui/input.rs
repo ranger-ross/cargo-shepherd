@@ -5,6 +5,7 @@ use crate::app::App;
 /// What the event loop should do after a key press.
 pub enum Action {
     Continue,
+    Delete,
     Quit,
     Rescan,
 }
@@ -80,10 +81,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
             app.cycle_sort();
             Action::Continue
         }
-        (KeyCode::Char('d'), _) => {
-            app.delete_selected();
-            Action::Continue
-        }
+        (KeyCode::Char('d'), _) => Action::Delete,
         (KeyCode::Char('r'), _) => Action::Rescan,
         _ => Action::Continue,
     }
@@ -144,7 +142,7 @@ mod tests {
     }
 
     #[test]
-    fn d_deletes_selected_target() {
+    fn d_requests_deletion() {
         let root = std::env::temp_dir().join("cargo-storage-test-input-delete");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("proj/target")).unwrap();
@@ -152,9 +150,9 @@ mod tests {
         app.set_discovered(vec![root.join("proj")]);
         assert!(matches!(
             handle_key(&mut app, key(KeyCode::Char('d'))),
-            Action::Continue
+            Action::Delete
         ));
-        assert!(!root.join("proj/target").exists());
+        assert!(root.join("proj/target").exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 

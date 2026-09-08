@@ -339,6 +339,19 @@ impl App {
         let Some(target_dir) = self.entries.get(entry_idx).map(|e| e.target_dir.clone()) else {
             return;
         };
+
+        let Some(entry) = self.entries.get_mut(entry_idx) else {
+            return;
+        };
+        if entry.is_under_deletion {
+            // Exit early if the entry is already being deleted.
+            return;
+        }
+        // Mark the entry as being deleted.
+        entry.is_under_deletion = true;
+
+        // TODO: Enqueue `entry.target_path` for asynchronous deletion.
+
         // Neighbor below by identity, so the resort below cannot lose it.
         // No row below keeps the current selection.
         let neighbor_idx = match sel {
