@@ -1,10 +1,10 @@
-//! macOS Spotlight prefetch for `Cargo.toml` discovery.
+//! macOS Spotlight discovery for `Cargo.toml` files.
 //!
 //! Queries the metadata index for `Cargo.toml` files under `root`, filters
 //! hits to match walk semantics (gitignores, `.git`/`.cargo` pruning, custom
-//! output dirs), and records accepted manifest dirs. The filesystem walk in
-//! [`super::run_collect`] remains authoritative unless
-//! `CARGO_STORAGE_SPOTLIGHT_ONLY=1` opts into indexed-only discovery.
+//! output dirs), and records accepted manifest dirs. When hits are accepted,
+//! [`super::run_collect`] skips the main filesystem walk unless
+//! `CARGO_STORAGE_SPOTLIGHT_WALK=1` requests a full walk as well.
 
 use std::path::{Component, Path};
 use std::sync::Arc;
@@ -18,8 +18,8 @@ use super::{
 
 /// Env var disabling the Spotlight prefetch (`0`, `false`, `no`, `off`).
 pub(crate) const ENV_DISABLE: &str = "CARGO_STORAGE_SPOTLIGHT";
-/// Env var skipping the filesystem walk when the prefetch accepted hits.
-pub(crate) const ENV_ONLY: &str = "CARGO_STORAGE_SPOTLIGHT_ONLY";
+/// Env var forcing a filesystem walk after Spotlight (`1`, `true`, `yes`).
+pub(crate) const ENV_WALK: &str = "CARGO_STORAGE_SPOTLIGHT_WALK";
 
 /// Query Spotlight for `Cargo.toml` under `root` and record accepted manifests.
 /// Returns `true` when at least one candidate was accepted.
@@ -76,19 +76,16 @@ pub(crate) fn collect(root: &Path, ctx: &Arc<Ctx>) -> bool {
         accepted += 1;
     }
     if accepted == 0 {
-        tracing::debug!(
-            count = indexed,
-            "spotlight hits were all filtered out"
-        );
+        tracing::debug!(count = indexed, "spotlight hits were all filtered out");
         return false;
     }
-    tracing::info!(indexed, accepted, "spotlight prefetch complete");
+    tracing::info!(indexed, accepted, "spotlight discovery complete");
     true
 }
 
-/// Whether indexed-only discovery is enabled via `CARGO_STORAGE_SPOTLIGHT_ONLY`.
-pub(crate) fn only_enabled() -> bool {
-    match std::env::var(ENV_ONLY).as_deref() {
+/// Whether a full filesystem walk is requested via `CARGO_STORAGE_SPOTLIGHT_WALK`.
+pub(crate) fn walk_requested() -> bool {
+    match std::env::var(ENV_WALK).as_deref() {
         Ok("0") | Ok("false") | Ok("no") | Ok("off") => false,
         Ok(value) if value.eq_ignore_ascii_case("false") || value.eq_ignore_ascii_case("no") => {
             false
@@ -118,7 +115,8 @@ fn spotlight_disabled() -> bool {
 
 /// Whether `path` contains a normal path component equal to `name`.
 fn path_has_component(path: &Path, name: &str) -> bool {
-    path.components().any(|c| matches!(c, Component::Normal(s) if s == name))
+    path.components()
+        .any(|c| matches!(c, Component::Normal(s) if s == name))
 }
 
 fn is_truthy(value: &str) -> bool {
