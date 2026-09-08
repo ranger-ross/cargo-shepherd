@@ -326,63 +326,53 @@ impl App {
             .select(Some(i.saturating_sub(self.page_len.max(1))));
     }
 
-    /// Delete the selected project's `target/` dir. A missing dir
-    /// counts as deleted. Failures surface in `delete_error`.
-    /// Selection moves to the row below. Deleting the last row
-    /// keeps selection. A lone row keeps selection.
-    pub fn delete_selected(&mut self) {
+    /// Begin asychronous deletion of the selected entry's `target/` dir.
+    pub fn begin_delete(&mut self) -> Option<PathBuf> {
         self.navigated = true;
         let visible = self.visible_indices();
         let sel = self.table_state.selected();
         let entry_idx = sel.and_then(|i| visible.get(i).copied());
-        let Some(entry_idx) = entry_idx else { return };
+        let Some(entry_idx) = entry_idx else {
+            return None;
+        };
         let Some(target_dir) = self.entries.get(entry_idx).map(|e| e.target_dir.clone()) else {
-            return;
+            return None;
         };
 
         let Some(entry) = self.entries.get_mut(entry_idx) else {
-            return;
+            return None;
         };
-        if entry.is_under_deletion {
+        if entry.is_being_deleted {
             // Exit early if the entry is already being deleted.
-            return;
+            return None;
         }
         // Mark the entry as being deleted.
-        entry.is_under_deletion = true;
+        entry.is_being_deleted = true;
+        Some(target_dir)
+    }
 
-        // TODO: Enqueue `entry.target_path` for asynchronous deletion.
-
-        // Neighbor below by identity, so the resort below cannot lose it.
-        // No row below keeps the current selection.
-        let neighbor_idx = match sel {
-            Some(i) => visible.get(i + 1).copied(),
-            None => None,
-        };
-        let neighbor = neighbor_idx.and_then(|i| self.entries.get(i).map(|e| e.target_dir.clone()));
-        match std::fs::remove_dir_all(&target_dir) {
+    /// Finish asynchronous deletion, processing success or failure.
+    ///
+    /// A missing dir counts as deleted. Failures surface in `delete_error`.
+    /// Selection stays put.
+    pub fn finish_delete(&mut self, target_dir: PathBuf, result: std::io::Result<()>) {
+        match result {
             Ok(()) => self.delete_error = None,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => self.delete_error = None,
+            Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => self.delete_error = None,
             Err(e) => {
+                if let Some(entry) = self.entries.iter_mut().find(|e| e.target_dir == target_dir) {
+                    entry.is_being_deleted = false;
+                }
                 self.delete_error = Some(format!("delete {}: {e}", target_dir.display()));
                 return;
             }
         }
+
         if let Some(entry) = self.entries.iter_mut().find(|e| e.target_dir == target_dir) {
             entry.size = Some(0);
             entry.last_modified = None;
         }
         self.total_size = self.entries.iter().filter_map(|e| e.size).sum();
-        if neighbor.is_none() {
-            return;
-        }
-        let visible = self.visible_indices();
-        let pos = visible.iter().position(|&i| {
-            self.entries
-                .get(i)
-                .is_some_and(|e| Some(&e.target_dir) == neighbor.as_ref())
-        });
-        self.table_state
-            .select(pos.or_else(|| visible.first().map(|_| 0)));
     }
 
     /// Select the first row without counting as user navigation, so the
@@ -474,6 +464,14 @@ mod tests {
         // measurements follow the selection instead of pinning to top.
         app.navigated = true;
         app
+    }
+
+    /// Simulate deleting the selected entry's `target_dir` for testing purposes.
+    ///
+    /// Synchronously calls `begin_delete()` then `finish_delete()`.
+    fn simulate_deletion_sync(app: &mut App) {
+        let target_dir = app.begin_delete().expect("selected target");
+        app.finish_delete(target_dir.clone(), std::fs::remove_dir_all(target_dir));
     }
 
     #[test]
@@ -730,7 +728,7 @@ mod tests {
             last_modified: Some(SystemTime::UNIX_EPOCH),
         }]);
         app.finish_scan(None);
-        app.delete_selected();
+        simulate_deletion_sync(&mut app);
         assert!(!root.join("proj/target").exists());
         assert_eq!(app.entries[0].size, Some(0));
         assert_eq!(app.entries[0].last_modified, None);
@@ -752,7 +750,7 @@ mod tests {
         app.finish_scan(None);
         app.set_filter("proj-b".to_string());
         assert_eq!(app.visible_indices().len(), 1);
-        app.delete_selected();
+        simulate_deletion_sync(&mut app);
         assert!(!root.join("proj-b/target").exists());
         assert!(root.join("proj-a/target").exists());
         let _ = std::fs::remove_dir_all(&root);
@@ -772,7 +770,7 @@ mod tests {
         // which counts as deleted.
         let mut app = app_with_entries();
         app.table_state.select(Some(0));
-        app.delete_selected();
+        simulate_deletion_sync(&mut app);
         assert_eq!(selected_project(&app), PathBuf::from("proj-small"));
         // Deleting a middle row moves down, not up.
         let mut app = App::new(PathBuf::from("."));
@@ -801,18 +799,18 @@ mod tests {
         app.finish_scan(None);
         app.navigated = true;
         app.table_state.select(Some(1));
-        app.delete_selected();
+        simulate_deletion_sync(&mut app);
         assert_eq!(selected_project(&app), PathBuf::from("proj-small"));
         // Deleting the last row keeps selection on the deleted row.
         let mut app = app_with_entries();
         app.table_state.select(Some(1));
-        app.delete_selected();
+        simulate_deletion_sync(&mut app);
         assert_eq!(app.table_state.selected(), Some(1));
         assert_eq!(selected_project(&app), PathBuf::from("proj-small"));
         // A lone row keeps selection.
         let mut solo = App::new(PathBuf::from("."));
         solo.set_discovered(vec![PathBuf::from("only")]);
-        solo.delete_selected();
+        simulate_deletion_sync(&mut solo);
         assert_eq!(solo.table_state.selected(), Some(0));
     }
 
