@@ -143,6 +143,7 @@ impl App {
                 .enumerate()
                 .filter(|(_, e)| {
                     re.is_match(&e.project_name())
+                        || re.is_match(&e.display_name())
                         || re.is_match(&e.project_path.to_string_lossy())
                         || re.is_match(&e.target_dir.to_string_lossy())
                 })

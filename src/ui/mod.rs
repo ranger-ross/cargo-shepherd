@@ -300,7 +300,8 @@ pub(crate) fn output_suffix(
 }
 
 /// Project cell: shared `$CARGO_HOME` dirs show their special name in the
-/// per-kind highlight color, otherwise the project name plus kind suffix.
+/// per-kind highlight color, otherwise the display name plus kind suffix.
+/// Linked git worktrees render as `main` plus a highlighted `(tree)` tag.
 pub(crate) fn project_spans(
     entry: &crate::scan::TargetEntry,
     entries: &[crate::scan::TargetEntry],
@@ -313,7 +314,13 @@ pub(crate) fn project_spans(
         };
         return vec![Span::styled(shared, base.fg(color))];
     }
-    let mut spans = vec![Span::styled(entry.project_name(), base)];
+    let mut spans = match entry.worktree_names() {
+        Some((main, tree)) => vec![
+            Span::styled(main, base),
+            Span::styled(format!(" ({tree})"), Style::default().fg(Color::Cyan)),
+        ],
+        None => vec![Span::styled(entry.project_name(), base)],
+    };
     if let Some((label, color)) = output_suffix(entry, entries) {
         spans.push(Span::styled(label, Style::default().fg(color)));
     }
@@ -606,6 +613,34 @@ mod tests {
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].content.as_ref(), "Shared Build Dir");
         assert_eq!(spans[0].style.fg, Some(Color::Blue));
+    }
+
+    #[test]
+    fn worktree_cells_show_main_name_with_tree_tag() {
+        use crate::scan::{OutputKind, TargetEntry};
+        use ratatui::style::Style;
+        let root = std::env::temp_dir().join("cargo-storage-test-wt-cell");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("trees/t1")).unwrap();
+        std::fs::write(
+            root.join("trees/t1/.git"),
+            format!("gitdir: {}/main/.git/worktrees/t1\n", root.display()),
+        )
+        .unwrap();
+        let entry = TargetEntry {
+            project_path: root.join("trees/t1"),
+            target_dir: root.join("trees/t1/target"),
+            kind: OutputKind::Target,
+            shared: false,
+            size: None,
+            last_modified: None,
+        };
+        let spans = project_spans(&entry, std::slice::from_ref(&entry), Style::default());
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].content.as_ref(), "main");
+        assert_eq!(spans[1].content.as_ref(), " (t1)");
+        assert_eq!(spans[1].style.fg, Some(Color::Cyan));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
