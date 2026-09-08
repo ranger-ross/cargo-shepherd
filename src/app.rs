@@ -198,11 +198,11 @@ impl App {
         visible
     }
 
-    /// The row at a position in the sorted, filtered table.
-    pub fn visible_entry(&self, position: usize) -> Option<&TargetEntry> {
+    /// The entry at a position in the sorted, filtered table.
+    pub fn visible_entry_mut(&mut self, position: usize) -> Option<&mut TargetEntry> {
         self.visible_indices()
             .get(position)
-            .and_then(|&index| self.entries.get(index))
+            .and_then(|&index| self.entries.get_mut(index))
     }
 
     #[tracing::instrument(skip_all)]
@@ -331,25 +331,18 @@ impl App {
     /// Move selection to the next row, if any.
     pub fn begin_delete(&mut self) -> Option<PathBuf> {
         self.navigated = true;
-        let visible = self.visible_indices();
-        let sel = self.table_state.selected();
-        let entry_idx = sel.and_then(|i| visible.get(i).copied());
-        let Some(entry_idx) = entry_idx else {
-            return None;
-        };
-        let Some(target_dir) = self.entries.get(entry_idx).map(|e| e.target_dir.clone()) else {
-            return None;
-        };
 
-        let Some(entry) = self.entries.get_mut(entry_idx) else {
-            return None;
-        };
+        let sel = self.table_state.selected()?;
+        let entry = self.visible_entry_mut(sel)?;
+
         if entry.is_being_deleted {
             // Exit early if the entry is already being deleted.
             return None;
         }
         // Mark the entry as being deleted.
         entry.is_being_deleted = true;
+
+        let target_dir = entry.target_dir.clone();
 
         // Move selection down.
         self.table_state.select_next();
@@ -519,14 +512,14 @@ mod tests {
             last_modified: Some(SystemTime::UNIX_EPOCH),
         }]);
         assert_eq!(
-            app.visible_entry(0).unwrap().project_path,
+            app.visible_entry_mut(0).unwrap().project_path,
             PathBuf::from("proj-small")
         );
         assert_eq!(app.total_size, 300);
         let selected = app
             .table_state
             .selected()
-            .and_then(|i| app.visible_entry(i))
+            .and_then(|i| app.visible_entry_mut(i))
             .unwrap();
         assert_eq!(selected.project_path, PathBuf::from("proj-small"));
         assert_eq!(selected.size, Some(200));
@@ -558,16 +551,16 @@ mod tests {
         }]);
         assert!(app.scanning);
         assert_eq!(app.total_size, 50);
-        assert_eq!(app.visible_entry(0).unwrap().size, None);
+        assert_eq!(app.visible_entry_mut(0).unwrap().size, None);
         assert_eq!(
-            app.visible_entry(1).unwrap().project_path,
+            app.visible_entry_mut(1).unwrap().project_path,
             PathBuf::from("proj-a")
         );
-        assert_eq!(app.visible_entry(1).unwrap().size, Some(50));
+        assert_eq!(app.visible_entry_mut(1).unwrap().size, Some(50));
         // Finishing keeps still-pending rows pending for the poller.
         app.finish_scan(None);
         assert!(!app.scanning);
-        assert_eq!(app.visible_entry(0).unwrap().size, None);
+        assert_eq!(app.visible_entry_mut(0).unwrap().size, None);
     }
     #[test]
     fn fresh_discovery_jumps_to_top() {
@@ -591,7 +584,7 @@ mod tests {
             last_modified: Some(SystemTime::UNIX_EPOCH),
         }]);
         assert_eq!(
-            app.visible_entry(0).unwrap().project_path,
+            app.visible_entry_mut(0).unwrap().project_path,
             PathBuf::from("proj-a")
         );
         assert_eq!(app.table_state.selected(), Some(0));
@@ -606,12 +599,12 @@ mod tests {
             last_modified: Some(SystemTime::UNIX_EPOCH),
         }]);
         assert_eq!(
-            app.visible_entry(0).unwrap().project_path,
+            app.visible_entry_mut(0).unwrap().project_path,
             PathBuf::from("proj-a")
         );
-        assert_eq!(app.visible_entry(0).unwrap().size, None);
+        assert_eq!(app.visible_entry_mut(0).unwrap().size, None);
         assert_eq!(
-            app.visible_entry(1).unwrap().project_path,
+            app.visible_entry_mut(1).unwrap().project_path,
             PathBuf::from("proj-b")
         );
         // Once everything measures, pure size-desc takes over.
@@ -621,11 +614,11 @@ mod tests {
             last_modified: Some(SystemTime::UNIX_EPOCH),
         }]);
         assert_eq!(
-            app.visible_entry(0).unwrap().project_path,
+            app.visible_entry_mut(0).unwrap().project_path,
             PathBuf::from("proj-a")
         );
         assert_eq!(
-            app.visible_entry(1).unwrap().project_path,
+            app.visible_entry_mut(1).unwrap().project_path,
             PathBuf::from("proj-b")
         );
     }
@@ -644,7 +637,7 @@ mod tests {
             last_modified: Some(SystemTime::UNIX_EPOCH),
         }]);
         assert_eq!(
-            app.visible_entry(0).unwrap().project_path,
+            app.visible_entry_mut(0).unwrap().project_path,
             PathBuf::from("proj-b")
         );
         assert_eq!(app.table_state.selected(), Some(0));
