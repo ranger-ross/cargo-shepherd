@@ -390,6 +390,7 @@ impl App {
         self.total_size = self.total_size.saturating_sub(size);
 
         // Mark the entry as deleted.
+        entry.is_being_deleted = false;
         entry.size = Some(0);
         entry.last_modified = None;
 
@@ -756,6 +757,7 @@ mod tests {
         app.finish_scan(None);
         simulate_deletion_sync(&mut app);
         assert!(!root.join("proj/target").exists());
+        assert!(!app.entries[0].is_being_deleted);
         assert_eq!(app.entries[0].size, Some(0));
         assert_eq!(app.entries[0].last_modified, None);
         assert_eq!(app.total_size, 0);
