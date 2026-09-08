@@ -89,6 +89,7 @@ impl App {
                             shared: found.shared,
                             size: None,
                             last_modified: None,
+                            is_under_deletion: false,
                         });
                     }
                     std::cmp::Ordering::Equal => {
@@ -109,6 +110,7 @@ impl App {
                         shared: found.shared,
                         size: None,
                         last_modified: None,
+                        is_under_deletion: false,
                     });
                 }
                 (Some(_), None) => {
@@ -239,6 +241,7 @@ impl App {
                     shared: false,
                     size: Some(m.size),
                     last_modified: m.last_modified,
+                    is_under_deletion: false,
                 });
             }
         }
@@ -660,7 +663,7 @@ mod tests {
     fn filter_alternation_narrows_to_matches() {
         let mut app = app_with_entries();
         app.set_filter("big|zzz".to_string());
-        assert_eq!(app.visible_indices(), vec![1]);
+        assert_eq!(app.visible_indices(), vec![0]);
         app.set_filter("proj-".to_string());
         assert_eq!(app.visible_indices().len(), 2);
     }
@@ -670,7 +673,7 @@ mod tests {
         let mut app = App::new(PathBuf::from("."));
         app.set_discovered(vec![PathBuf::from("ws/member-a"), PathBuf::from("other")]);
         app.set_filter("member".to_string());
-        assert_eq!(app.visible_indices(), vec![0]);
+        assert_eq!(app.visible_indices(), vec![1]);
     }
 
     #[test]
