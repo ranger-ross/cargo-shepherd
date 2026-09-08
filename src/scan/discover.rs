@@ -5,10 +5,11 @@
 //! `build.target-dir` / `build.build-dir` in `.cargo/config.toml` report
 //! those dirs instead of `target/`.
 //!
-//! On macOS, discovery may prefetch manifests from Spotlight (`mdquery-rs`)
-//! before the authoritative filesystem walk. Set `CARGO_STORAGE_SPOTLIGHT=0`
-//! to skip the prefetch. Set `CARGO_STORAGE_SPOTLIGHT_ONLY=1` to use indexed
-//! results without walking (faster, but incomplete when the index lags).
+//! On macOS, discovery uses Spotlight (`mdquery-rs`) to find `Cargo.toml`
+//! files quickly and skips the main filesystem walk when the index returns
+//! hits. Set `CARGO_STORAGE_SPOTLIGHT=0` to force the walk. Set
+//! `CARGO_STORAGE_SPOTLIGHT_WALK=1` to run both (slower, catches unindexed
+//! manifests). Linked worktrees are still walked after Spotlight.
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
@@ -149,14 +150,11 @@ fn walk_ctx(root: &Path, mut resolver: Resolver) -> Arc<Ctx> {
     ctx
 }
 
-/// Discover manifests under `root`, optionally prefetching from Spotlight.
+/// Discover manifests under `root`, preferring Spotlight on macOS.
 fn run_collect(root: &Path, ctx: &Arc<Ctx>) {
     #[cfg(target_os = "macos")]
-    {
-        let indexed = spotlight::collect(root, ctx);
-        if indexed && spotlight::only_enabled() {
-            return;
-        }
+    if !spotlight::walk_requested() && spotlight::collect(root, ctx) {
+        return;
     }
     run_walk(root, ctx);
 }
@@ -554,7 +552,6 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
-
     #[test]
     fn local_target_and_shared_build_dir_both_listed() {
         let root = std::env::temp_dir().join("cargo-storage-test-local-shared-build");
@@ -570,7 +567,11 @@ mod tests {
             &root,
             Resolver::with_home_build_dir(shared_build.to_string_lossy()),
         );
-        assert_eq!(projects.len(), 2, "local target and shared build-dir: {projects:?}");
+        assert_eq!(
+            projects.len(),
+            2,
+            "local target and shared build-dir: {projects:?}"
+        );
         let build = projects
             .iter()
             .find(|e| e.kind == super::super::OutputKind::Build)
