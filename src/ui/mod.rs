@@ -121,12 +121,19 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                 };
                 let spans = project_spans(e, &app.entries, base);
                 let name = Text::from(Line::from(spans));
-                let mut size_text = match e.size {
-                    Some(_) => Text::styled(format_size_opt(e.size), size_style(e.size)),
-                    None => Text::from(
-                        crate::ui::loading::Loading::new("Loading...", app.loading_start.elapsed())
+                let mut size_text = if e.is_under_deletion {
+                    Text::styled("DELETING...", Style::default().fg(crate::ui::theme::AMBER))
+                } else {
+                    match e.size {
+                        Some(_) => Text::styled(format_size_opt(e.size), size_style(e.size)),
+                        None => Text::from(
+                            crate::ui::loading::Loading::new(
+                                "Loading...",
+                                app.loading_start.elapsed(),
+                            )
                             .line(),
-                    ),
+                        ),
+                    }
                 };
                 size_text.alignment = Some(Alignment::Right);
                 let mut row = Row::new([
@@ -518,6 +525,7 @@ mod tests {
             shared: false,
             size: None,
             last_modified: None,
+            is_under_deletion: false,
         };
         assert_eq!(format_modified_entry(&pending), "-");
     }
@@ -531,6 +539,7 @@ mod tests {
             shared: false,
             size: None,
             last_modified: None,
+            is_under_deletion: false,
         };
         let pair = vec![
             entry("tout", OutputKind::Target),
@@ -556,6 +565,7 @@ mod tests {
             shared: false,
             size: None,
             last_modified: None,
+            is_under_deletion: false,
         };
         assert_eq!(output_suffix(&only, std::slice::from_ref(&only)), None);
         // Same path twice is one row, not a pair.
@@ -575,6 +585,7 @@ mod tests {
             shared: true,
             size: None,
             last_modified: None,
+            is_under_deletion: false,
         };
         assert_eq!(
             shared(OutputKind::Target).shared_label(),
@@ -602,6 +613,7 @@ mod tests {
             shared: true,
             size: None,
             last_modified: None,
+            is_under_deletion: false,
         };
         let target = entry(OutputKind::Target);
         let spans = project_spans(&target, std::slice::from_ref(&target), Style::default());
@@ -634,6 +646,7 @@ mod tests {
             shared: false,
             size: None,
             last_modified: None,
+            is_under_deletion: false,
         };
         let spans = project_spans(&entry, std::slice::from_ref(&entry), Style::default());
         assert_eq!(spans.len(), 2);
