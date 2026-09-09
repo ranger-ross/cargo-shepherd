@@ -142,8 +142,9 @@ fn run(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, root: PathBuf
         }
 
         poller.poll(&mut app);
-        // 60fps while loading, 10fps otherwise.
-        let frame_budget = if app.scanning {
+        // 60fps while loading or deleting, 10fps otherwise.
+        let deleting = app.entries.iter().any(|e| e.is_being_deleted);
+        let frame_budget = if app.scanning || deleting {
             Duration::from_millis(16)
         } else {
             Duration::from_millis(100)
