@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1](https://github.com/ranger-ross/cargo-storage/compare/v0.4.0...v0.4.1) - 2026-09-09
+
+### Fixed
+
+- Enable 60fps during deletes so loading is smooth
+
 ## [0.4.0](https://github.com/ranger-ross/cargo-storage/compare/v0.3.1...v0.3.2) - 2026-09-08
 
 ### Fixed
